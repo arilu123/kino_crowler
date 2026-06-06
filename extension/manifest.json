@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Kinopoisk Crawler",
+  "version": "0.1.0",
+  "description": "Извлекает данные фильма со страницы Кинопоиска и шлёт локальному писателю.",
+  "permissions": ["scripting"],
+  "host_permissions": [
+    "*://www.kinopoisk.ru/*",
+    "http://localhost:8787/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://www.kinopoisk.ru/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
