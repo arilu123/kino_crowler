@@ -14,7 +14,15 @@
   "content_scripts": [
     {
       "matches": ["*://www.kinopoisk.ru/*"],
-      "js": ["content.js"],
+      "js": [
+        "content-core.js",
+        "content-panel.js",
+        "content-film.js",
+        "content-discover.js",
+        "content-subpages.js",
+        "content-person.js",
+        "content-main.js"
+      ],
       "run_at": "document_idle"
     }
   ]

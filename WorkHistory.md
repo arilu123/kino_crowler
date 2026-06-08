@@ -443,6 +443,50 @@ ad-block CSS и clstorage-скриптами, но награды — обычн
   потоках) — оба успешны (pg Pool тянет параллельные запросы). Реальные награды 301 восстановлены (26).
 - Браузерная часть (порядок бейджей вживую) — финальная сверка при заходе расширением, как обычно.
 
+### Решение 29. Постоянный показ нерешённых атрибутов + чистка тестового «weird» (2026-06-08)
+Баг (пользователь): атрибут `weird` висел `status='new'`, но в панели не показывался → когда-то
+мелькнул на первой встрече и был пропущен. Причина: плашка `🆕` рисовалась ТОЛЬКО из `newAttrs`
+(ключи, впервые вставленные в этом конкретном сохранении) — разовое событие. После первой встречи
+ключ «известен», `newAttrs` пуст, плашка больше не появлялась, хотя триажа не было.
+**Фикс — рисуем из БД, постоянно:**
+- writer: `/queue` (`queueFilms`) дополнительно отдаёт `pendingAttrs` = `SELECT … FROM discovered_attrs
+  WHERE status='new'` (source, key, first_film_id, first_value).
+- content.js: `setNewAttrs(list)` → `setPendingAttrs(list)` — рисует ВСЕ нерешённые (source:key, пример
+  значения, ссылка на #first_film_id), оранжевый блок виден, пока список непуст. Вызывается из
+  `renderQueue` (т.е. при каждом `refreshQueue`). Из `send()` разовые `setNewAttrs([])`/`setNewAttrs(
+  r.newAttrs)` убраны (остался только `console.warn` о первой встрече). В тик добавлен
+  `refreshQueue()` каждые 8 тиков (~12 c) — раньше очередь обновлялась лишь после save/discover,
+  а `sendDiscover` рано выходит, если новых ссылок нет → панель могла не обновляться. Теперь надёжно.
+- **Откуда `weird`:** тестовый мусор от 2026-06-06 (реш. 7, проверка самообнаружения «поймал
+  spectators/newField/weirdLdKey»). `first_film_id=999777` — выкидной тестовый id; фильма нет в `films`,
+  ни в одном `raw->'_ld'` ключа `weird` нет. Это НЕ атрибут Сайта. Удалён
+  (`DELETE FROM discovered_attrs WHERE source='ld' AND key='weird' AND first_film_id=999777`).
+- Проверено: `/queue` до чистки отдавал weird в pendingAttrs, после — пусто; осталось promoted 5,
+  deferred 2, new 0. node --check ok.
+- ⚠️ Урок: тестировать discovery на выкидных id — ок, но за собой подчищать discovered_attrs
+  (иначе мусор «висит» в новом постоянном индикаторе).
+
+### Решение 30. Разбиение монолитов content.js / writer.js на модули (2026-06-08)
+- **Проблема:** `content.js` (1160 строк) и `writer.js` (803) разрослись — дорого читать целиком
+  (токены) и тяжело ориентироваться. Логика уже была чётко разбита секциями-комментариями.
+- **content-script (extension/):** убрана обёрточная IIFE, код разрезан на 7 файлов. Content-скрипты
+  одного `content_scripts.js[]` исполняются в ОДНОМ isolated-world и делят глобальную лексическую
+  область — top-level `const`/`let`/`function` видны между файлами. Все межфайловые вызовы — в рантайме
+  (внутри `tick()`/обработчиков), поэтому порядок важен только для автозапуска: `content-main.js`
+  (цикл `tick`) грузится ПОСЛЕДНИМ. Модули: `content-core.js` (состояние, утилиты, id/ld, парс дат,
+  `commitPage`/`sendMsg`/`ensureHtmlSaved`), `content-panel.js`, `content-film.js` (`extract`/`send`/
+  `schedule`), `content-discover.js`, `content-subpages.js` (cast/dates/box/studio/other/keywords/awards),
+  `content-person.js`, `content-main.js` (`window.kp` + `tick`). `RU_MONTHS`/`parseRuDate` перенесены в
+  core (нужны и dates, и person). Порядок прописан в `manifest.json`.
+- **writer (server/):** CommonJS → `require`/`module.exports`. `db.js` (пул `pool`), `saves.js` (все
+  `save*` + самообнаружение атрибутов), `queue.js` (`knownFilmIds`/`discoverLinks`/`queueFilms`),
+  `writer.js` остался точкой входа (`main` в package.json): http-сервер + роутинг.
+- **Проверка:** `node --check` всех файлов ✓; сверка символов content (рабочая копия vs сумма модулей) —
+  потерь/задвоений нет; тестовый writer на :8799 — `/queue`, `/known` (вернул `[78871]`), `/movie` с битым
+  телом (`{"error":"no movie id"}`) отработали против реальной БД. Доки обновлены (README, movie-info-list).
+- ⚠️ Действие юзера: нажать «обновить» у расширения в `chrome://extensions` (изменился список файлов).
+  Запущенный старый `writer.js` (pid был 7767 на :8787) перезапустить, чтобы подхватить модули.
+
 ### Окружение / доступ к БД
 - psql: `/Applications/Postgres.app/Contents/Versions/17/bin/psql -h localhost -U mac -d kinopoisk`
 - writer: `node server/writer.js` (или env `DATABASE_URL`).

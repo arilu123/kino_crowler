@@ -82,13 +82,24 @@
 
 ## Файлы
 - `manifest.json` — MV3, content-script на `/film/*`, host-доступ к localhost:8787.
-- `content.js` — извлечение (логика = корневой `extractor.js`).
+- content-script разбит на модули (грузятся по порядку, делят общий isolated-world scope;
+  `content-main.js` обязан быть последним — в нём опросный цикл `tick()`):
+  - `content-core.js` — состояние сессии, утилиты, разбор id/ld, парс дат, обмен с writer (`commitPage`).
+  - `content-panel.js` — плавающая панель (очередь, переобход, бейдж, новые атрибуты).
+  - `content-film.js` — главная фильма `/film/{id}/`: `extract()` + `send`/`schedule`.
+  - `content-discover.js` — сбор ссылок, подсветка посещённых, отправка в очередь.
+  - `content-subpages.js` — `/cast/ /dates/ /box/ /studio/ /other/ /keywords/ /awards/`.
+  - `content-person.js` — `/name/{id}/` (формат Next.js).
+  - `content-main.js` — консольный API `window.kp` и цикл `tick()` (точка входа).
 - `background.js` — POST данных писателю (обходит CORS/CSP страницы).
-- `../server/writer.js` — локальный писатель (Node + pg → Postgres).
+- `../server/writer.js` — локальный писатель (Node + pg → Postgres): http-сервер и роутинг (точка входа).
+  - `../server/db.js` — пул соединений с Postgres.
+  - `../server/saves.js` — запись в БД (`saveMovie`/`saveCast`/… и самообнаружение атрибутов).
+  - `../server/queue.js` — очередь/обнаружение ссылок (`queueFilms`/`discoverLinks`/`knownFilmIds`).
 - `../db/schema.sql` — схема БД.
 
 ## Если не пишется
 - Проверь, что писатель запущен и подключился к БД (`node server/writer.js`).
 - Postgres запущен? БД `kinopoisk` и схема созданы?
 - Порт 8787 занят? Поменяй `PORT` (env или в `writer.js`) и `WRITER_URL` в `background.js`.
-- После правок `content.js`/`background.js` нажми «обновить» у расширения в `chrome://extensions`.
+- После правок `content-*.js`/`background.js` нажми «обновить» у расширения в `chrome://extensions`.
