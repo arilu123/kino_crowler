@@ -50,6 +50,11 @@ const KNOWN_LD_KEYS = new Set([
   "timeRequired", "datePublished",
   "award", "video",  // решение 9: пока живут в raw (_ld), структура позже
 ]);
+// известные строки страницы персоны (/name/{id}/); прочее → discovered_attrs source='name'
+const KNOWN_NAME_KEYS = new Set([
+  "career", "height", "birthday", "deathday", "placeOfBirthday",
+  "mainGenres", "filmographyTotal",
+]);
 
 // возвращает список ВПЕРВЫЕ встреченных (вставленных) ключей вида 'table:key' / 'ld:key'
 async function recordDiscoveries(client, movie) {
@@ -401,6 +406,133 @@ async function saveKeywords({ filmId, keywords }) {
   }
 }
 
+// награды/номинации со страницы /film/{id}/awards/ — пересобирает film_awards.
+// Попутно upsert'им заглушки персон (как в касте), чтобы привязанные к наградам люди
+// попали в очередь обогащения.
+async function saveAwards({ filmId, awards }) {
+  filmId = Number(filmId);
+  if (!filmId || !Array.isArray(awards) || !awards.length) throw new Error("bad awards");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO films (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [filmId]);
+    for (const a of awards) {
+      if (!a.personId) continue;
+      await client.query(
+        `INSERT INTO persons (id, name, updated_at) VALUES ($1,$2,now())
+         ON CONFLICT (id) DO UPDATE SET
+           name = COALESCE(persons.name, EXCLUDED.name),
+           updated_at = now()`,
+        [a.personId, a.personName || null]
+      );
+    }
+    await client.query("DELETE FROM film_awards WHERE film_id=$1", [filmId]);
+    for (const a of awards) {
+      await client.query(
+        `INSERT INTO film_awards
+           (film_id, ord, award_slug, award_name, year, country, result, category, nom_id, person_id, person_name)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [filmId, a.ord, a.awardSlug || null, a.awardName || null, a.year ?? null,
+         a.country || null, a.result || null, a.category || null, a.nomId || null,
+         a.personId ?? null, a.personName || null]
+      );
+    }
+    await client.query("UPDATE films SET awards_fetched=true, updated_at=now() WHERE id=$1", [filmId]);
+    await client.query("COMMIT");
+    return { filmId, awards: awards.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// персона со страницы /name/{id}/ — обогащение persons (решение 26).
+// Самообнаружение новых строк (data-test-id) → discovered_attrs source='name'.
+async function recordPersonDiscoveries(client, person) {
+  const fresh = [];
+  const rows = person._rows || {};
+  for (const [key, value] of Object.entries(rows)) {
+    if (KNOWN_NAME_KEYS.has(key)) continue;
+    const r = await client.query(
+      `INSERT INTO discovered_attrs (source, key, first_film_id, first_value)
+       VALUES ('name', $1, $2, $3) ON CONFLICT (source, key) DO NOTHING`,
+      [key, person.id, (value || "").slice(0, 500)]
+    );
+    if (r.rowCount === 1) fresh.push("name:" + key);
+  }
+  return fresh;
+}
+
+async function savePerson({ person }) {
+  if (!person || !person.id) throw new Error("no person id");
+  const id = Number(person.id);
+  const photo =
+    typeof person.photo === "string" && !/^data:/i.test(person.photo) ? person.photo : null;
+  const arr = (a) => (Array.isArray(a) && a.length ? a : null);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const newAttrs = await recordPersonDiscoveries(client, person);
+    // COALESCE имени: не затираем уже известное, если со страницы пришло пустое
+    await client.query(
+      `INSERT INTO persons (
+         id, name, name_orig, gender, birth_date, death_date, birth_place,
+         height_cm, zodiac, professions, genres, films_total, career_start,
+         career_end, photo, source_url, enriched, raw, updated_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, true, $17, now()
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         name        = COALESCE(EXCLUDED.name, persons.name),
+         name_orig   = COALESCE(EXCLUDED.name_orig, persons.name_orig),
+         gender      = COALESCE(EXCLUDED.gender, persons.gender),
+         birth_date  = COALESCE(EXCLUDED.birth_date, persons.birth_date),
+         death_date  = COALESCE(EXCLUDED.death_date, persons.death_date),
+         birth_place = COALESCE(EXCLUDED.birth_place, persons.birth_place),
+         height_cm   = COALESCE(EXCLUDED.height_cm, persons.height_cm),
+         zodiac      = COALESCE(EXCLUDED.zodiac, persons.zodiac),
+         professions = COALESCE(EXCLUDED.professions, persons.professions),
+         genres      = COALESCE(EXCLUDED.genres, persons.genres),
+         films_total = COALESCE(EXCLUDED.films_total, persons.films_total),
+         career_start= COALESCE(EXCLUDED.career_start, persons.career_start),
+         career_end  = COALESCE(EXCLUDED.career_end, persons.career_end),
+         photo       = COALESCE(EXCLUDED.photo, persons.photo),
+         source_url  = EXCLUDED.source_url,
+         enriched    = true,
+         raw         = EXCLUDED.raw,
+         updated_at  = now()`,
+      [
+        id, person.name || null, person.nameOrig || null, person.gender || null,
+        person.birthDate || null, person.deathDate || null, person.birthPlace || null,
+        person.heightCm ?? null, person.zodiac || null, arr(person.professions),
+        arr(person.genres), person.filmsTotal ?? null, person.careerStart ?? null,
+        person.careerEnd ?? null, photo, person.sourceUrl || null,
+        JSON.stringify({ _ld: person._ld ?? null, _rows: person._rows ?? null }),
+      ]
+    );
+    await client.query("COMMIT");
+    return { id, name: person.name || null, enriched: true, newAttrs };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// исходный HTML страницы (решение 27): upsert по url. Сохраняем ПЕРЕД парсингом.
+async function saveHtml({ url, html }) {
+  if (!url || typeof html !== "string" || !html.length) throw new Error("bad html");
+  await pool.query(
+    `INSERT INTO page_html (url, raw_html, fetched_at) VALUES ($1,$2,now())
+     ON CONFLICT (url) DO UPDATE SET raw_html=EXCLUDED.raw_html, fetched_at=now()`,
+    [url, html]
+  );
+  return { url, bytes: html.length };
+}
+
 // какие из переданных id фильмов уже есть в БД (для подсветки посещённых)
 async function knownFilmIds(ids) {
   const clean = (ids || []).map(Number).filter(Boolean);
@@ -566,6 +698,50 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(result));
     } catch (e) {
       console.error("✗ keywords", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/awards") {
+    try {
+      const result = await saveAwards(JSON.parse(await readBody(req)));
+      console.log(`✓ награды ${result.filmId} (${result.awards} строк)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ awards", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/html") {
+    try {
+      const result = await saveHtml(JSON.parse(await readBody(req)));
+      console.log(`✓ исходник ${result.url} (${(result.bytes / 1024) | 0} KB)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ html", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/person") {
+    try {
+      const result = await savePerson(JSON.parse(await readBody(req)));
+      console.log(`✓ персона ${result.id} (${result.name || "?"})`);
+      if (result.newAttrs && result.newAttrs.length)
+        console.log(`  🆕 новые атрибуты персоны: ${result.newAttrs.join(", ")}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ person", e.message);
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
     }

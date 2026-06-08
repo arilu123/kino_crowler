@@ -337,37 +337,33 @@
   }
 
   // ---------- отправка фильма ----------
-  function send(movie) {
+  // оптимистично: исходник (ensureHtmlSaved) и запись фильма летят параллельно; ✓/↻ только если оба ок
+  async function send(movie) {
     setNewAttrs([]); // сбросить плашку предыдущего фильма
     setBadge(`⏳ запись #${movie.id}…`, "#b8860b");
-    chrome.runtime.sendMessage({ type: "movie", movie }, (resp) => {
-      if (chrome.runtime.lastError) {
-        SEEN.delete(movie.id);
-        setBadge(`✗ нет связи с расширением #${movie.id}`, "#cf222e");
-        dbg("sendMessage lastError:", chrome.runtime.lastError.message);
-        return;
-      }
-      dbg("ответ по #" + movie.id + ":", resp);
-      const r = resp && resp.ok && resp.result;
-      if (r) {
-        KNOWN_DB.add(movie.id);
-        lastStatus = { id: movie.id, title: movie.title, isNew: r.isNew, firstSeen: r.firstSeen };
-        if (r.isNew) setBadge(`✓ #${movie.id} записан · ${movie.title}`, "#1a7f37");
-        else {
-          const d = r.firstSeen ? new Date(r.firstSeen).toLocaleDateString("ru-RU") : "";
-          setBadge(`↻ #${movie.id} обновлён · был ${d}`, "#0969da");
-        }
-        console.log(`%c[kp] ${r.isNew ? "✓ записан" : "↻ обновлён"} #${movie.id} — ${movie.title}`, "color:green");
-        setNewAttrs(r.newAttrs);
-        if (r.newAttrs && r.newAttrs.length)
-          console.warn("[kp] 🆕 новые атрибуты:", r.newAttrs.join(", "));
-        refreshQueue(); // фильм ушёл из очереди (или из переобхода) — обновим список
-      } else {
-        SEEN.delete(movie.id);
-        setBadge(`✗ ошибка записи #${movie.id}`, "#cf222e");
-        console.warn("[kp] ошибка записи", movie.id, resp && resp.error);
-      }
-    });
+    const htmlP = ensureHtmlSaved();
+    const resp = await sendMsg({ type: "movie", movie });
+    const htmlOk = await htmlP;
+    dbg("ответ по #" + movie.id + ":", resp, "htmlOk:", htmlOk);
+    const r = resp && resp.ok && resp.result;
+    if (!r || !htmlOk) {
+      SEEN.delete(movie.id); // повтор на следующем тике (записи идемпотентны)
+      setBadge(`✗ ошибка записи #${movie.id}`, "#cf222e");
+      console.warn("[kp] ошибка записи", movie.id, { dataOk: !!r, htmlOk, error: resp && resp.error });
+      return;
+    }
+    KNOWN_DB.add(movie.id);
+    lastStatus = { id: movie.id, title: movie.title, isNew: r.isNew, firstSeen: r.firstSeen };
+    if (r.isNew) setBadge(`✓ #${movie.id} записан · ${movie.title}`, "#1a7f37");
+    else {
+      const d = r.firstSeen ? new Date(r.firstSeen).toLocaleDateString("ru-RU") : "";
+      setBadge(`↻ #${movie.id} обновлён · был ${d}`, "#0969da");
+    }
+    console.log(`%c[kp] ${r.isNew ? "✓ записан" : "↻ обновлён"} #${movie.id} — ${movie.title}`, "color:green");
+    setNewAttrs(r.newAttrs);
+    if (r.newAttrs && r.newAttrs.length)
+      console.warn("[kp] 🆕 новые атрибуты:", r.newAttrs.join(", "));
+    refreshQueue(); // фильм ушёл из очереди (или из переобхода) — обновим список
   }
 
   let debounce = null;
@@ -552,18 +548,12 @@
     if (SENT_CAST.has(filmId)) return;
     const data = extractCast();
     if (!data) return;
-    SENT_CAST.add(filmId);
-    setBadge(`⏳ каст #${filmId}…`, "#b8860b");
-    chrome.runtime.sendMessage({ type: "cast", filmId, credits: data.credits }, (resp) => {
-      if (chrome.runtime.lastError || !(resp && resp.ok)) {
-        SENT_CAST.delete(filmId);
-        setBadge(`✗ каст #${filmId}`, "#cf222e");
-        dbg("cast error", filmId, chrome.runtime.lastError || (resp && resp.error));
-        return;
-      }
-      setBadge(`✓ каст #${filmId}: ${data.credits.length} чел.`, "#1a7f37");
-      console.log(`%c[kp] ✓ каст #${filmId} — ${data.credits.length} участников`, "color:green");
-    });
+    commitPage(SENT_CAST, filmId,
+      `⏳ каст #${filmId}…`,
+      `✓ каст #${filmId}: ${data.credits.length} чел.`,
+      `✗ каст #${filmId}`,
+      { type: "cast", filmId, credits: data.credits },
+      `✓ каст #${filmId} — ${data.credits.length} участников`);
   }
 
   // ---------- даты: /film/{id}/dates/ ----------
@@ -616,17 +606,12 @@
     if (SENT_DATES.has(filmId)) return;
     const data = extractDates();
     if (!data) return;
-    SENT_DATES.add(filmId);
-    setBadge(`⏳ даты #${filmId}…`, "#b8860b");
-    chrome.runtime.sendMessage({ type: "dates", filmId, dates: data.dates }, (resp) => {
-      if (chrome.runtime.lastError || !(resp && resp.ok)) {
-        SENT_DATES.delete(filmId);
-        setBadge(`✗ даты #${filmId}`, "#cf222e");
-        return;
-      }
-      setBadge(`✓ даты #${filmId}: ${data.dates.length} зап.`, "#1a7f37");
-      console.log(`%c[kp] ✓ даты #${filmId} — ${data.dates.length} записей`, "color:green");
-    });
+    commitPage(SENT_DATES, filmId,
+      `⏳ даты #${filmId}…`,
+      `✓ даты #${filmId}: ${data.dates.length} зап.`,
+      `✗ даты #${filmId}`,
+      { type: "dates", filmId, dates: data.dates },
+      `✓ даты #${filmId} — ${data.dates.length} записей`);
   }
 
   // ---------- сборы: /film/{id}/box/ (+ вкладки стран /box/<country>/) ----------
@@ -694,17 +679,12 @@
     if (!data) return;
     const key = data.filmId + ":" + data.tab;
     if (SENT_BOX.has(key)) return;
-    SENT_BOX.add(key);
-    setBadge(`⏳ сборы #${data.filmId} (${data.tab})…`, "#b8860b");
-    chrome.runtime.sendMessage({ type: "box", filmId: data.filmId, tab: data.tab, rows: data.rows }, (resp) => {
-      if (chrome.runtime.lastError || !(resp && resp.ok)) {
-        SENT_BOX.delete(key);
-        setBadge(`✗ сборы #${data.filmId}`, "#cf222e");
-        return;
-      }
-      setBadge(`✓ сборы #${data.filmId} (${data.tab}): ${data.rows.length} стр.`, "#1a7f37");
-      console.log(`%c[kp] ✓ сборы #${data.filmId} (${data.tab}) — ${data.rows.length} строк`, "color:green");
-    });
+    commitPage(SENT_BOX, key,
+      `⏳ сборы #${data.filmId} (${data.tab})…`,
+      `✓ сборы #${data.filmId} (${data.tab}): ${data.rows.length} стр.`,
+      `✗ сборы #${data.filmId}`,
+      { type: "box", filmId: data.filmId, tab: data.tab, rows: data.rows },
+      `✓ сборы #${data.filmId} (${data.tab}) — ${data.rows.length} строк`);
   }
 
   // ---------- студии/тех.данные: /film/{id}/studio/ ----------
@@ -784,17 +764,12 @@
     if (SENT_STUDIO.has(filmId)) return;
     const data = extractStudio();
     if (!data) return;
-    SENT_STUDIO.add(filmId);
-    setBadge(`⏳ студии #${filmId}…`, "#b8860b");
-    chrome.runtime.sendMessage({ type: "studio", filmId, tech: data.tech, studios: data.studios }, (resp) => {
-      if (chrome.runtime.lastError || !(resp && resp.ok)) {
-        SENT_STUDIO.delete(filmId);
-        setBadge(`✗ студии #${filmId}`, "#cf222e");
-        return;
-      }
-      setBadge(`✓ студии #${filmId}: ${data.studios.length} комп., ${data.tech.length} тех.`, "#1a7f37");
-      console.log(`%c[kp] ✓ студии #${filmId} — ${data.studios.length} компаний, ${data.tech.length} тех.строк`, "color:green");
-    });
+    commitPage(SENT_STUDIO, filmId,
+      `⏳ студии #${filmId}…`,
+      `✓ студии #${filmId}: ${data.studios.length} комп., ${data.tech.length} тех.`,
+      `✗ студии #${filmId}`,
+      { type: "studio", filmId, tech: data.tech, studios: data.studios },
+      `✓ студии #${filmId} — ${data.studios.length} компаний, ${data.tech.length} тех.строк`);
   }
 
   // ---------- связанные фильмы: /film/{id}/other/ ----------
@@ -842,17 +817,12 @@
     if (SENT_OTHER.has(filmId)) return;
     const data = extractOther();
     if (!data) return;
-    SENT_OTHER.add(filmId);
-    setBadge(`⏳ связи #${filmId}…`, "#b8860b");
-    chrome.runtime.sendMessage({ type: "other", filmId, relations: data.relations }, (resp) => {
-      if (chrome.runtime.lastError || !(resp && resp.ok)) {
-        SENT_OTHER.delete(filmId);
-        setBadge(`✗ связи #${filmId}`, "#cf222e");
-        return;
-      }
-      setBadge(`✓ связи #${filmId}: ${data.relations.length}`, "#1a7f37");
-      console.log(`%c[kp] ✓ связи #${filmId} — ${data.relations.length} фильмов`, "color:green");
-    });
+    commitPage(SENT_OTHER, filmId,
+      `⏳ связи #${filmId}…`,
+      `✓ связи #${filmId}: ${data.relations.length}`,
+      `✗ связи #${filmId}`,
+      { type: "other", filmId, relations: data.relations },
+      `✓ связи #${filmId} — ${data.relations.length} фильмов`);
   }
 
   // ---------- ключевые слова: /film/{id}/keywords/ ----------
@@ -883,17 +853,258 @@
     if (SENT_KW.has(filmId)) return;
     const data = extractKeywords();
     if (!data) return;
-    SENT_KW.add(filmId);
-    setBadge(`⏳ ключ.слова #${filmId}…`, "#b8860b");
-    chrome.runtime.sendMessage({ type: "keywords", filmId, keywords: data.keywords }, (resp) => {
-      if (chrome.runtime.lastError || !(resp && resp.ok)) {
-        SENT_KW.delete(filmId);
-        setBadge(`✗ ключ.слова #${filmId}`, "#cf222e");
-        return;
+    commitPage(SENT_KW, filmId,
+      `⏳ ключ.слова #${filmId}…`,
+      `✓ ключ.слова #${filmId}: ${data.keywords.length}`,
+      `✗ ключ.слова #${filmId}`,
+      { type: "keywords", filmId, keywords: data.keywords },
+      `✓ ключевые слова #${filmId} — ${data.keywords.length}`);
+  }
+
+  // ---------- награды/номинации: /film/{id}/awards/ ----------
+  // Классический формат (st.kp.yandex.net). Каждая премия — отдельная `<table>` с флагом страны
+  // в фоне (`flags/original/XX.png`); заголовок — `td[height=40] b a[/awards/<slug>/<year>/]`
+  // («Оскар, 2000 год»). Внутри секции: `<b>Победитель</b>` (оранжевый, result=win) или
+  // `<b>Номинации</b>` (result=nomination); далее `ul.trivia > li.trivia` со ссылкой-категорией
+  // (`a[href*="#nom"]`) и, опционально, персоной(ами) (`a[/name/ID/]`). Категория с несколькими
+  // персонами → одна строка на персону; без персон → строка с person_id=NULL.
+  const SENT_AWARDS = new Set();
+
+  function extractAwards() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/awards\/?$/);
+    if (!m) return null;
+    const filmId = Number(m[1]);
+    const rows = [];
+    let ord = 0;
+    const seen = new Set();
+    for (const a of document.querySelectorAll('td[height="40"] a[href^="/awards/"]')) {
+      const hm = (a.getAttribute("href") || "").match(/^\/awards\/([a-z0-9_]+)\/(\d+)\/$/);
+      if (!hm) continue;
+      const table = a.closest("table");
+      if (!table || seen.has(table)) continue;
+      seen.add(table);
+      const slug = hm[1];
+      const year = Number(hm[2]);
+      const name = clean(a.textContent).replace(/,\s*\d{4}\s*год\.?$/i, "");
+      const fm = (table.getAttribute("style") || "").match(/flags\/original\/([a-z]+)\.png/);
+      const country = fm ? fm[1] : null;
+      let result = null;
+      for (const td of table.querySelectorAll("td.news")) {
+        const b = td.querySelector("b");
+        const btxt = b ? clean(b.textContent) : "";
+        if (/Победител/i.test(btxt)) result = "win";
+        else if (/Номинац/i.test(btxt)) result = "nomination";
+        const ul = td.querySelector("ul.trivia");
+        if (!ul) continue;
+        for (const li of ul.querySelectorAll("li.trivia")) {
+          const ca = li.querySelector('a[href*="#nom"]');
+          const category = ca ? clean(ca.textContent) : null;
+          const nm = ca && (ca.getAttribute("href") || "").match(/#(nom\d+)/);
+          const nomId = nm ? nm[1] : null;
+          const persons = [...li.querySelectorAll('a[href*="/name/"]')];
+          if (persons.length) {
+            for (const pa of persons) {
+              rows.push({
+                ord: ord++, awardSlug: slug, awardName: name, year, country, result,
+                category, nomId,
+                personId: idFromName(pa.getAttribute("href")),
+                personName: clean(pa.textContent) || null,
+              });
+            }
+          } else {
+            rows.push({
+              ord: ord++, awardSlug: slug, awardName: name, year, country, result,
+              category, nomId, personId: null, personName: null,
+            });
+          }
+        }
       }
-      setBadge(`✓ ключ.слова #${filmId}: ${data.keywords.length}`, "#1a7f37");
-      console.log(`%c[kp] ✓ ключевые слова #${filmId} — ${data.keywords.length}`, "color:green");
+    }
+    return rows.length ? { filmId, awards: rows } : null;
+  }
+
+  function maybeSendAwards() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/awards\/?$/);
+    if (!m) return;
+    const filmId = Number(m[1]);
+    if (SENT_AWARDS.has(filmId)) return;
+    const data = extractAwards();
+    if (!data) return;
+    commitPage(SENT_AWARDS, filmId,
+      `⏳ награды #${filmId}…`,
+      `✓ награды #${filmId}: ${data.awards.length}`,
+      `✗ награды #${filmId}`,
+      { type: "awards", filmId, awards: data.awards },
+      `✓ награды #${filmId} — ${data.awards.length} строк`);
+  }
+
+  // ---------- персона: /name/{id}/ ----------
+  // Формат Next.js (как главная фильма): классы захешированы, якоримся по data-test-id и ld+json.
+  // ВАЖНО (как реш. 11): на SPA-переходе ld может остаться от старой персоны → ld берём только при
+  // совпадении ld.url с адресом; всё видимое — из DOM (перерисовывается). Текущий id подтверждаем
+  // по ссылке-подстранице в теле (`a[href^="/name/ID/<раздел>"]`), а не по ld.
+  const SENT_PERSON = new Set();
+
+  const personLd = () => {
+    const urlId = idFromName(location.pathname);
+    if (!urlId) return null;
+    for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const o = JSON.parse(s.textContent);
+        if (o && o["@type"] === "Person" && idFromName(o.url) === urlId) return o;
+      } catch (_) {}
+    }
+    return null;
+  };
+  // id персоны по ТЕЛУ страницы (вкладки /name/ID/photos|media|relations|awards перерисовываются на SPA)
+  const domNameId = () => {
+    for (const a of document.querySelectorAll('a[href^="/name/"]')) {
+      const m = (a.getAttribute("href") || "").match(/^\/name\/(\d+)\/[a-z]+/);
+      if (m) return Number(m[1]);
+    }
+    return null;
+  };
+  const noData = (v) => v == null || /^data:/i.test(v) ? null : v;
+
+  function extractPerson() {
+    const m = location.pathname.match(/^\/name\/(\d+)\/?$/);
+    if (!m) return null;
+    const urlId = Number(m[1]);
+    if (domNameId() !== urlId) return null;          // тело ещё от старой персоны (SPA) — ждём
+    const ld = personLd();                            // null при несовпадении (устаревший ld не берём)
+
+    // все информационные строки (data-test-id с парой title/value) — полный снимок
+    const rows = {};
+    const rowEl = {};
+    for (const el of document.querySelectorAll("div[data-test-id]")) {
+      const t = el.querySelector('[class*="styles_title"]');
+      const v = el.querySelector('[class*="styles_value"]');
+      if (!t || !v) continue;
+      const key = el.getAttribute("data-test-id");
+      if (!key || key in rows) continue;
+      rows[key] = clean(v.textContent);
+      rowEl[key] = el;
+    }
+
+    const name = clean((document.querySelector('[class*="primaryName"]') || {}).textContent) ||
+      (ld && ld.name) || null;
+    const nameOrig = clean((document.querySelector('[class*="secondaryName"]') || {}).textContent) ||
+      (ld && ld.alternateName) || null;
+
+    // профессии: ld.jobTitle (массив) либо строка «Карьера»
+    let professions = Array.isArray(ld && ld.jobTitle) ? ld.jobTitle.slice()
+      : (rows.career ? rows.career.split(",") : []);
+    professions = professions.map((s) => clean(s)).filter(Boolean);
+
+    const genres = (rows.mainGenres ? rows.mainGenres.split(",") : [])
+      .map((s) => clean(s)).filter(Boolean);
+
+    // рост «1.83 м» → см
+    let heightCm = null;
+    const hm = (rows.height || "").match(/([\d.,]+)\s*м/);
+    if (hm) heightCm = Math.round(parseFloat(hm[1].replace(",", ".")) * 100) || null;
+
+    // дата рождения: ISO из ld, иначе разбор строки «11 ноября, 1974»
+    let birthDate = (ld && ld.birthDate) || parseRuDate((rows.birthday || "").replace(/,/g, " "));
+    const deathDate = parseRuDate((rows.deathday || "").replace(/,/g, " ")) || null;
+
+    // знак зодиака — ссылка zodiac в строке рождения
+    let zodiac = null;
+    if (rowEl.birthday) {
+      const z = rowEl.birthday.querySelector('a[href*="zodiac"]');
+      if (z) zodiac = clean(z.textContent) || null;
+    }
+
+    const birthPlace = rows.placeOfBirthday || null;
+
+    // всего фильмов + диапазон лет: «285 , 1984 — 2026»
+    let filmsTotal = null, careerStart = null, careerEnd = null;
+    if (rows.filmographyTotal) {
+      const nums = rows.filmographyTotal.match(/\d+/g) || [];
+      if (nums[0]) filmsTotal = Number(nums[0]);
+      const years = (rows.filmographyTotal.match(/\b(19|20)\d{2}\b/g) || []).map(Number);
+      if (years.length) { careerStart = years[0]; careerEnd = years[years.length - 1]; }
+    }
+
+    const gender = ld && ld.gender ? (/female/i.test(ld.gender) ? "female"
+      : /male/i.test(ld.gender) ? "male" : null) : null;
+
+    const ogImg = document.querySelector('meta[property="og:image"]');
+    const photo = noData((ld && ld.image) || (ogImg && ogImg.getAttribute("content")) || null);
+
+    return {
+      id: urlId, name, nameOrig, gender, birthDate, deathDate, birthPlace,
+      heightCm, zodiac, professions, genres, filmsTotal, careerStart, careerEnd,
+      photo, sourceUrl: `/name/${urlId}/`,
+      _ld: ld ? sanitizeLd(ld) : null,
+      _rows: rows,
+    };
+  }
+
+  function maybeSendPerson() {
+    const m = location.pathname.match(/^\/name\/(\d+)\/?$/);
+    if (!m) return;
+    const personId = Number(m[1]);
+    if (SENT_PERSON.has(personId)) return;
+    const data = extractPerson();
+    if (!data || !data.name) return;                 // ещё не отрисовалось/несинхронно
+    commitPage(SENT_PERSON, personId,
+      `⏳ персона #${personId}…`,
+      `✓ персона #${personId}: ${data.name}`,
+      `✗ персона #${personId}`,
+      { type: "person", person: data },
+      `✓ персона #${personId} — ${data.name}`);
+  }
+
+  // ---------- архив исходного HTML + оптимистичный коммит (реш. 28) ----------
+  // Исходник страницы (page_html) и распарсенные данные пишутся ПАРАЛЛЕЛЬНО; «✓» показываем
+  // только если успешны ОБА. Страницу помечаем обработанной лишь при полном успехе — иначе повтор
+  // на следующем тике (все записи идемпотентны: upsert / DELETE+INSERT, html — upsert по url).
+
+  // промисификация sendMessage: resp = {ok, result?} | {ok:false, error}
+  function sendMsg(msg) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(msg, (resp) => {
+        if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
+        else resolve(resp || { ok: false });
+      });
     });
+  }
+
+  // сохранение исходника текущей страницы — оптимистично, мемоизировано per-url за сессию.
+  // Вызывается ИЗ парсера (страница уже признана готовой/синхронной), поэтому url = текущая страница.
+  // Успех кэшируется; ошибка — нет (даём повтор). Возвращает Promise<boolean>.
+  const _htmlSaved = new Map(); // url -> Promise<boolean>
+  function ensureHtmlSaved() {
+    const url = location.origin + location.pathname; // без query
+    const cached = _htmlSaved.get(url);
+    if (cached) return cached;
+    const html = document.documentElement.outerHTML;
+    const p = sendMsg({ type: "html", url, html }).then((resp) => {
+      const ok = !!(resp && resp.ok);
+      if (ok) dbg("исходник сохранён:", url, ((html.length / 1024) | 0) + "KB");
+      else _htmlSaved.delete(url); // повторим в следующий раз
+      return ok;
+    });
+    _htmlSaved.set(url, p);
+    return p;
+  }
+
+  // оптимистичный коммит подстраницы: html-сейв и парс летят параллельно, ждём оба
+  async function commitPage(sentSet, key, busy, okMsg, fail, msg, logLine) {
+    sentSet.add(key);
+    setBadge(busy, "#b8860b");
+    const htmlP = ensureHtmlSaved();           // оптимистично, не ждём
+    const resp = await sendMsg(msg);           // парс — параллельно с исходником
+    const htmlOk = await htmlP;                // в конце дожидаемся исходника
+    if (!(resp && resp.ok) || !htmlOk) {
+      sentSet.delete(key);
+      setBadge(fail, "#cf222e");
+      dbg("commit fail", key, { dataOk: !!(resp && resp.ok), htmlOk, err: resp && resp.error });
+      return;
+    }
+    setBadge(okMsg, "#1a7f37");
+    if (logLine) console.log(`%c[kp] ${logLine}`, "color:green");
   }
 
   // ---------- консольный API ----------
@@ -909,6 +1120,7 @@
       };
     },
     go: (id) => { location.href = `/film/${id}/`; },
+    person: () => extractPerson(),
     queue: () => refreshQueue(),
     refresh: () => { asked.clear(); markLinks(); sendDiscover(); },
   };
@@ -927,6 +1139,8 @@
       maybeSendStudio();                            // /film/{id}/studio/: компании + тех.данные
       maybeSendOther();                             // /film/{id}/other/: связанные фильмы
       maybeSendKeywords();                          // /film/{id}/keywords/: ключевые слова
+      maybeSendAwards();                             // /film/{id}/awards/: награды/номинации
+      maybeSendPerson();                             // /name/{id}/: обогащение персоны
       if (_ticks % 2 === 0) { markLinks(); sendDiscover(); } // подсветка/очередь — реже (3 c)
     } catch (e) {
       dbg("tick error:", e && e.message);

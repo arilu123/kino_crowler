@@ -56,4 +56,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     post("/keywords", { filmId: msg.filmId, keywords: msg.keywords }, sendResponse);
     return true; // async
   }
+  if (msg && msg.type === "awards") {
+    post("/awards", { filmId: msg.filmId, awards: msg.awards }, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "person") {
+    post("/person", { person: msg.person }, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "html") {
+    post("/html", { url: msg.url, html: msg.html }, sendResponse);
+    return true; // async
+  }
 });

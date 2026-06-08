@@ -19,6 +19,8 @@
 - [x] Полный raw (_ld + _allTable) + триаж атрибутов (discovered_attrs.status); releases → колонки
 
 ## Дальше
+- [x] Архив исходного HTML: `page_html(url, raw_html)` — перед парсингом любой разбираемой страницы
+      (главная/подстраницы/персона) сохраняем исходник целиком (upsert по url). TOAST-сжатие Postgres.
 - [x] Захват «веток» главной (подстраницы /film/{id}/<раздел>/) в очередь (kind='page:*')
 - [ ] Парсеры подстраниц (по очереди kind='page:*'):
   - [x] cast `/film/{id}/cast/` — полный каст + вся группа → full_cast_fetched=true (роли: +voice/voice_director/translator; +character, +persons.name_orig)
@@ -31,9 +33,13 @@
   - [x] keywords `/film/{id}/keywords/` — ключевые слова (film_keywords: id+текст), keywords_fetched
   - [x] other `/film/{id}/other/` — связанные фильмы (film_relations: типизированные рёбра film→film,
         сырой тип секции; year/title_orig), other_fetched. Связанные фильмы и так идут в link_queue.
+  - [x] awards `/film/{id}/awards/` — премии/номинации (film_awards: премия+год+страна, win/nomination,
+        категория, привязка к персоне; одна строка на персону), awards_fetched
   - [ ] опц.: votes, rn/R, video
-- [ ] Экстрактор персон `/name/{id}/` → обогащение persons (enriched=true)
-- [ ] Структура для наград (ld.award) и видео-ссылок (ld.video) — сейчас deferred в raw
+- [x] Экстрактор персон `/name/{id}/` → обогащение persons (enriched=true): пол, даты рожд./смерти,
+      место рожд., рост, знак зодиака, профессии[], жанры[], всего фильмов + диапазон лет, фото.
+      Полный raw (_ld+_rows), самообнаружение строк → discovered_attrs source='name'.
+- [ ] Структура для видео-ссылок (ld.video) — сейчас deferred в raw (награды теперь берём со страницы /awards/)
 - [ ] Источник списка id фильмов для обхода (наполнение очереди сотнями)
 - [ ] Отслеживание новинок и обновление устаревших карточек
 - [ ] Косметика полей: box_world формат «+X=Y», audience хвост «…ещё N»

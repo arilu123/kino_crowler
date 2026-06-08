@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS films (
   studio_fetched    boolean NOT NULL DEFAULT false,-- /film/{id}/studio/ ещё не разбирали
   other_fetched     boolean NOT NULL DEFAULT false,-- /film/{id}/other/ (связанные фильмы) ещё не разбирали
   keywords_fetched  boolean NOT NULL DEFAULT false,-- /film/{id}/keywords/ ещё не разбирали
+  awards_fetched    boolean NOT NULL DEFAULT false,-- /film/{id}/awards/ (награды/номинации) ещё не разбирали
   critics_checked   boolean NOT NULL DEFAULT false,-- главную пересняли после ввода критиков/IMDb (реш. 24)
   crawled_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now()
@@ -47,9 +48,23 @@ CREATE TABLE IF NOT EXISTS films (
 CREATE TABLE IF NOT EXISTS persons (
   id          bigint PRIMARY KEY,                  -- id персоны на Кинопоиске (/name/{id}/)
   name        text,
-  name_orig   text,                                -- оригинальное имя (со страницы каста)
+  name_orig   text,                                -- оригинальное имя (со страницы каста/персоны)
+  -- обогащение со страницы /name/{id}/ (решение 26):
+  gender       text,         -- male|female (из ld.gender)
+  birth_date   date,         -- дата рождения
+  death_date   date,         -- дата смерти (если есть)
+  birth_place  text,         -- место рождения (город, регион, страна)
+  height_cm    int,          -- рост в см (из «1.83 м»)
+  zodiac       text,         -- знак зодиака
+  professions  text[],       -- профессии (Актер, Продюсер, …) = ld.jobTitle / строка «Карьера»
+  genres       text[],       -- основные жанры (строка «Жанры»)
+  films_total  int,          -- всего фильмов (строка «Всего фильмов»)
+  career_start int,          -- первый год фильмографии
+  career_end   int,          -- последний год фильмографии
+  photo        text,         -- ссылка на фото (CDN), без data:-бинаря
+  source_url   text,         -- /name/{id}/
   enriched    boolean NOT NULL DEFAULT false,      -- страница персоны ещё не разобрана (это и есть очередь)
-  raw         jsonb,
+  raw         jsonb,                               -- полный снимок: _ld (sanitized) + _rows (все строки)
   crawled_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
@@ -153,6 +168,28 @@ CREATE TABLE IF NOT EXISTS film_keywords (
 CREATE INDEX IF NOT EXISTS idx_keywords_film ON film_keywords(film_id);
 CREATE INDEX IF NOT EXISTS idx_keywords_kid  ON film_keywords(keyword_id);
 
+-- награды/премии/номинации со страницы /film/{id}/awards/ (реш. 25).
+-- Каждый блок-таблица = одна премия за год (заголовок `/awards/<slug>/<year>/`, флаг страны в фоне).
+-- Внутри секции «Победитель» (result=win) и «Номинации» (result=nomination), в них список
+-- номинаций (категорий). Категория может быть привязана к персоне(ам) — одна строка на персону
+-- (категория без персон → одна строка с person_id=NULL).
+CREATE TABLE IF NOT EXISTS film_awards (
+  film_id     bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+  ord         int    NOT NULL,        -- порядок в пределах фильма (как на странице)
+  award_slug  text,                   -- слаг премии (/awards/<slug>/<year>/)
+  award_name  text,                   -- название премии (Оскар, Премия канала «MTV», …)
+  year        int,                    -- год церемонии
+  country     text,                   -- код страны из флага в фоне (us, gb, …)
+  result      text,                   -- win | nomination
+  category    text,                   -- номинация/категория (Лучший звук)
+  nom_id      text,                   -- якорь #nomNNN на странице премии
+  person_id   bigint,                 -- связанная персона (если указана)
+  person_name text,
+  PRIMARY KEY (film_id, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_awards_film ON film_awards(film_id);
+CREATE INDEX IF NOT EXISTS idx_awards_person ON film_awards(person_id);
+
 -- рейтинг кинокритиков с главной страницы (блок criticRatingSection): мир + РФ.
 -- scope: world («Рейтинг кинокритиков в мире») | ru («В России») | <сырой label>.
 -- pct — % положительных; positive/negative — числа рецензий; avg — средняя оценка (если есть).
@@ -179,6 +216,16 @@ CREATE TABLE IF NOT EXISTS discovered_attrs (
   status        text NOT NULL DEFAULT 'new',  -- new | promoted | deferred | ignored
   first_seen    timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (source, key)
+);
+
+-- архив исходного HTML (решение 27): перед парсингом ЛЮБОЙ страницы (главная фильма,
+-- его подстраницы, страница персоны) её исходник целиком кладётся сюда. Страховка, чтобы
+-- переразбирать офлайн и не возвращаться на сайт. Postgres хранит большие строки через TOAST
+-- со сжатием — отдельный gzip не нужен. url = origin+path (без query).
+CREATE TABLE IF NOT EXISTS page_html (
+  url        text PRIMARY KEY,
+  raw_html   text,
+  fetched_at timestamptz NOT NULL DEFAULT now()
 );
 
 -- очередь обнаруженных ссылок (с любых страниц Сайта): фильмы и персоны.
