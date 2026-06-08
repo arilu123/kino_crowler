@@ -31,6 +31,38 @@ const domNameId = () => {
 };
 const noData = (v) => v == null || /^data:/i.test(v) ? null : v;
 
+// меню «фильмография по профессиям»: кнопки role/subrole + счётчик фильмов.
+// Якорь — маркер #person-filmography-block (за ним <nav> с кнопками); иерархию кодирует
+// сама подпись: «Актер» → role=Актер, subrole=null; «Актер: играет самого себя» → role=Актер,
+// subrole=«играет самого себя». Не завязываемся на хеши классов: ловим кнопки с подписью «N фильм…».
+function extractFilmography() {
+  const marker = document.getElementById("person-filmography-block");
+  const root = marker ? marker.parentElement : document;
+  if (!root) return [];
+  const out = [];
+  let ord = 0;
+  const seen = new Set();
+  for (const btn of root.querySelectorAll("button")) {
+    const spans = btn.querySelectorAll(":scope > span");
+    if (spans.length < 2) continue;
+    const label = clean(spans[0].textContent);
+    const sub = clean(spans[1].textContent);
+    const cm = sub.match(/(\d[\d\s]*)\s*фильм/i);     // «75 фильмов», «1 фильм», «1 234 фильма»
+    if (!label || !cm) continue;                      // не пункт фильмографии
+    if (seen.has(label)) continue;
+    seen.add(label);
+    const parts = label.split(/:\s*/);
+    out.push({
+      ord: ord++,
+      role: clean(parts[0]),
+      subrole: parts.length > 1 ? clean(parts.slice(1).join(": ")) || null : null,
+      count: Number(cm[1].replace(/\s/g, "")),
+      label,
+    });
+  }
+  return out;
+}
+
 function extractPerson() {
   const m = location.pathname.match(/^\/name\/(\d+)\/?$/);
   if (!m) return null;
@@ -101,6 +133,7 @@ function extractPerson() {
     id: urlId, name, nameOrig, gender, birthDate, deathDate, birthPlace,
     heightCm, zodiac, professions, genres, filmsTotal, careerStart, careerEnd,
     photo, sourceUrl: `/name/${urlId}/`,
+    filmography: extractFilmography(),   // роль/подроль → число фильмов (отдельная таблица)
     _ld: ld ? sanitizeLd(ld) : null,
     _rows: rows,
   };

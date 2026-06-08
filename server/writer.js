@@ -170,7 +170,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/person") {
     try {
       const result = await savePerson(JSON.parse(await readBody(req)));
-      console.log(`✓ персона ${result.id} (${result.name || "?"})`);
+      console.log(`✓ персона ${result.id} (${result.name || "?"}${result.filmography ? `, фильмография: ${result.filmography}` : ""})`);
       if (result.newAttrs && result.newAttrs.length)
         console.log(`  🆕 новые атрибуты персоны: ${result.newAttrs.join(", ")}`);
       res.writeHead(200, { "Content-Type": "application/json" });

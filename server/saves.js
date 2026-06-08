@@ -488,8 +488,22 @@ async function savePerson({ person }) {
         JSON.stringify({ _ld: person._ld ?? null, _rows: person._rows ?? null }),
       ]
     );
+
+    // фильмография по профессиям — пересобираем (DELETE+INSERT), только если пришла
+    const filmography = Array.isArray(person.filmography) ? person.filmography : [];
+    if (filmography.length) {
+      await client.query("DELETE FROM person_filmography WHERE person_id=$1", [id]);
+      for (const f of filmography) {
+        await client.query(
+          `INSERT INTO person_filmography (person_id, ord, role, subrole, films_count, label)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [id, f.ord, f.role || null, f.subrole || null, f.count ?? null, f.label || null]
+        );
+      }
+    }
+
     await client.query("COMMIT");
-    return { id, name: person.name || null, enriched: true, newAttrs };
+    return { id, name: person.name || null, enriched: true, newAttrs, filmography: filmography.length };
   } catch (e) {
     await client.query("ROLLBACK");
     throw e;

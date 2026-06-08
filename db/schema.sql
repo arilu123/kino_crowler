@@ -69,6 +69,21 @@ CREATE TABLE IF NOT EXISTS persons (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- фильмография персоны по профессиям (меню /name/{id}/, блок #person-filmography-block):
+-- role — базовая профессия (Актер, Продюсер, Сценарист, …); subrole — уточнение после «:»
+-- (играет самого себя, в титрах не указан, …) или NULL; films_count — число фильмов в (под)роли.
+-- Счётчики самостоятельны и НЕ обязаны сходиться с persons.films_total (камео/документалки и т.п.).
+CREATE TABLE IF NOT EXISTS person_filmography (
+  person_id   bigint NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  ord         int NOT NULL,
+  role        text,
+  subrole     text,
+  films_count int,
+  label       text,                                  -- исходная подпись кнопки целиком
+  PRIMARY KEY (person_id, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_filmography_person ON person_filmography(person_id);
+
 -- роли: directors|writers|producers|operators|composers|designers|editors|actor
 CREATE TABLE IF NOT EXISTS film_credits (
   film_id    bigint NOT NULL REFERENCES films(id)   ON DELETE CASCADE,

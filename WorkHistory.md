@@ -487,6 +487,26 @@ ad-block CSS и clstorage-скриптами, но награды — обычн
 - ⚠️ Действие юзера: нажать «обновить» у расширения в `chrome://extensions` (изменился список файлов).
   Запущенный старый `writer.js` (pid был 7767 на :8787) перезапустить, чтобы подхватить модули.
 
+### Решение 31. Фильмография персоны по профессиям → person_filmography (2026-06-08)
+- **Что:** на `/name/{id}/` есть меню «фильмография по профессиям» (блок-маркер
+  `<span id="person-filmography-block">`, далее `<nav>` с кнопками): роль/подроль + число фильмов.
+  Пример (ДиКаприо): Актер 75, Продюсер 75, Сценарист 1, «Актер: играет самого себя» 143,
+  «Актер: в титрах не указан» 9. Раньше **не собиралось** (кнопки `button` с `styles_title`/
+  `styles_subtitle`, а `extractPerson` берёт только `div[data-test-id]` с `styles_value` → мимо,
+  даже не в `_rows`). Счётчики самостоятельны и НЕ сходятся с `films_total` (143 > 75: камео/докум.).
+- **Схема:** новая таблица `person_filmography (person_id, ord, role, subrole, films_count, label)`,
+  PK `(person_id, ord)`, FK→persons ON DELETE CASCADE, индекс по person_id. Иерархию кодирует подпись:
+  split по «: » → role / subrole (NULL, если двоеточия нет).
+- **content-person.js:** `extractFilmography()` — якорь `#person-filmography-block`, ловит кнопки с
+  подписью «N фильм…» (`(\d[\d\s]*)\s*фильм`), дедуп по label. НЕ завязан на хеши классов/`data-tid`.
+  Результат кладётся в `person.filmography` (поле объекта персоны, тот же POST /person).
+- **saves.js `savePerson`:** в той же транзакции DELETE+INSERT в `person_filmography` (только если
+  пришла). Ответ дополнен `filmography: <кол-во>`, лог `/person` показывает его.
+- **Проверка:** схема применена к живой БД; `extractFilmography` прогнан через jsdom против двух
+  сохранённых страниц: ДиКаприо (3 профессии + 2 подроли → 5 строк 75/75/1/143/9) и Виктор Альваро
+  `/name/3785/` (1 профессия + 1 подроль → 2 строки 10/4). Структура (классы/`data-tid`/маркер)
+  идентична на обеих. `POST /person` записал ДиКаприо в таблицу. Если меню нет — вернёт [] (без ложных).
+
 ### Окружение / доступ к БД
 - psql: `/Applications/Postgres.app/Contents/Versions/17/bin/psql -h localhost -U mac -d kinopoisk`
 - writer: `node server/writer.js` (или env `DATABASE_URL`).
