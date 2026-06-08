@@ -7,13 +7,16 @@ CREATE TABLE IF NOT EXISTS films (
   title_orig        text,
   year              int,
   slogan            text,
+  originals         text,                          -- «Первоисточник» (на чём основан фильм), напр. «DC Universe»
   genres            text[],
   countries         text[],
   duration          int,                           -- минуты
   age_restriction   text,
   rating_mpaa       text,
-  rating_value      numeric,
+  rating_value      numeric,                       -- рейтинг Кинопоиска
   rating_count      int,
+  imdb_value        numeric,                       -- рейтинг IMDb (.film-sub-rating)
+  imdb_count        int,
   description       text,
   poster            text,                          -- ССЫЛКА на постер (не бинарь); data:-URI не храним
   box_budget        text,
@@ -32,6 +35,11 @@ CREATE TABLE IF NOT EXISTS films (
   raw               jsonb,                         -- сырой объект экстрактора (страховка)
   full_cast_fetched boolean NOT NULL DEFAULT false,-- /film/{id}/cast/ ещё не разбирали
   dates_fetched     boolean NOT NULL DEFAULT false,-- /film/{id}/dates/ ещё не разбирали
+  box_fetched       boolean NOT NULL DEFAULT false,-- /film/{id}/box/ ещё не разбирали
+  studio_fetched    boolean NOT NULL DEFAULT false,-- /film/{id}/studio/ ещё не разбирали
+  other_fetched     boolean NOT NULL DEFAULT false,-- /film/{id}/other/ (связанные фильмы) ещё не разбирали
+  keywords_fetched  boolean NOT NULL DEFAULT false,-- /film/{id}/keywords/ ещё не разбирали
+  critics_checked   boolean NOT NULL DEFAULT false,-- главную пересняли после ввода критиков/IMDb (реш. 24)
   crawled_at        timestamptz NOT NULL DEFAULT now(),
   updated_at        timestamptz NOT NULL DEFAULT now()
 );
@@ -69,6 +77,97 @@ CREATE TABLE IF NOT EXISTS film_dates (
   PRIMARY KEY (film_id, ord)
 );
 CREATE INDEX IF NOT EXISTS idx_dates_film ON film_dates(film_id);
+
+-- сборы со страницы /film/{id}/box/ (+ вкладки стран /box/<country>/).
+-- Generic key-value (как discovered_attrs): храним КАЖДУЮ строку секции, ничего не теряем.
+-- section — заголовок секции на странице («Кассовые сборы», «Затраты», «Первый уик-энд (США)»,
+-- «Прокат (США)», …); label — подпись строки; value — сырьё; amount/pct — распарсенное.
+-- tab — активная вкладка страны (для 301: «США» на /box/, «Россия» на /box/rus/).
+CREATE TABLE IF NOT EXISTS film_box (
+  film_id    bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+  tab        text   NOT NULL DEFAULT 'США',   -- активная вкладка страны на странице box
+  ord        int    NOT NULL,                 -- порядок строки в пределах (film,tab)
+  section    text,                            -- заголовок секции
+  label      text,                            -- подпись строки («В США», «Бюджет», …)
+  value      text,                            -- сырьё как на сайте («$171 479 930», «31.03.1999»)
+  amount     bigint,                          -- распарсенное число (NULL для дат/нечисел)
+  currency   text,                            -- '$' если денежное
+  pct        numeric,                         -- доля в процентах (37, 67.7), если указана
+  note       text,                            -- доп. в строке («(% от сборов)», «(кинотеатров: …)»)
+  PRIMARY KEY (film_id, tab, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_box_film ON film_box(film_id);
+
+-- компании со страницы /film/{id}/studio/ (секции «Производство»/«Спецэффекты»/
+-- «Студия дубляжа»/«Прокат»/…). id компании — из /lists/m_act[studio]/ID/.
+CREATE TABLE IF NOT EXISTS film_studios (
+  film_id      bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+  role         text   NOT NULL, -- production|effects|dubbing|distribution|<сырой заголовок>
+  ord          int    NOT NULL, -- порядок в пределах (film,role)
+  company_kind text,            -- namespace ссылки: studio|company|company_en (разные id-пространства!)
+  company_id   bigint,          -- числовой id (NULL для company_en — там слаг)
+  company_ref  text,            -- сырой идентификатор: число или слаг («warnerbros»)
+  name         text,
+  note         text,            -- доп.: описание («animatronic prosthetics») или страна («Россия») — зависит от роли
+  PRIMARY KEY (film_id, role, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_studios_film ON film_studios(film_id);
+CREATE INDEX IF NOT EXISTS idx_studios_company ON film_studios(company_id);
+
+-- технические характеристики со страницы /film/{id}/studio/ (верхний блок).
+-- Generic key-value, многозначные (Камера/Формат… повторяют label). Триаж/колонки — потом.
+CREATE TABLE IF NOT EXISTS film_tech (
+  film_id bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+  ord     int    NOT NULL,
+  label   text,    -- «Производство», «Съёмки», «Формат изображения», «Камера», «Язык»…
+  value   text,
+  PRIMARY KEY (film_id, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_tech_film ON film_tech(film_id);
+
+-- связанные фильмы со страницы /film/{id}/other/ (типизированные рёбра film→film).
+-- relation — сырой заголовок секции («Продолжение», «Приквел», «Ремейк», «Спин-офф», «Отсылки к»,
+-- «Спародирован в», «Упоминается в», «Смонтировано в», …); типы варьируются, нормализуем потом.
+-- Сам связанный фильм попадает в link_queue общим сканером ссылок — тут только типизированное ребро.
+CREATE TABLE IF NOT EXISTS film_relations (
+  film_id     bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,  -- исходный фильм
+  relation    text   NOT NULL,   -- тип связи (сырой заголовок секции)
+  ord         int    NOT NULL,   -- порядок в пределах (film,relation)
+  related_id  bigint,            -- id связанного фильма
+  title       text,              -- название связанного (с годом/квалификатором, как на странице)
+  title_orig  text,              -- оригинальное название (span.role)
+  year        int,               -- год (распарсен из названия)
+  PRIMARY KEY (film_id, relation, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_film ON film_relations(film_id);
+CREATE INDEX IF NOT EXISTS idx_relations_related ON film_relations(related_id);
+
+-- ключевые слова со страницы /film/{id}/keywords/ (теги). id — из /lists/m_act[keyword]/ID/.
+CREATE TABLE IF NOT EXISTS film_keywords (
+  film_id    bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+  ord        int    NOT NULL,
+  keyword_id bigint,            -- id ключевого слова (m_act[keyword]/ID/)
+  keyword    text,              -- текст (из data-real-keyword)
+  PRIMARY KEY (film_id, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_keywords_film ON film_keywords(film_id);
+CREATE INDEX IF NOT EXISTS idx_keywords_kid  ON film_keywords(keyword_id);
+
+-- рейтинг кинокритиков с главной страницы (блок criticRatingSection): мир + РФ.
+-- scope: world («Рейтинг кинокритиков в мире») | ru («В России») | <сырой label>.
+-- pct — % положительных; positive/negative — числа рецензий; avg — средняя оценка (если есть).
+CREATE TABLE IF NOT EXISTS film_critics (
+  film_id   bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+  scope     text   NOT NULL,        -- world | ru | <сырой заголовок>
+  label     text,                   -- сырой текст заголовка
+  pct       int,                    -- % положительных рецензий
+  count     int,                    -- всего оценок/рецензий
+  avg       numeric,                -- средняя оценка (звёзды), если показана
+  positive  int,
+  negative  int,
+  PRIMARY KEY (film_id, scope)
+);
+CREATE INDEX IF NOT EXISTS idx_critics_film ON film_critics(film_id);
 
 -- самообнаружение новых атрибутов: любой впервые встреченный ключ страницы.
 -- source: 'table' (data-test-id строки) | 'ld' (ключ ld+json). Один ряд на ключ.

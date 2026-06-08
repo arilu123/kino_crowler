@@ -220,6 +220,132 @@ SPA-переходы ловятся опросом (в пределах ~1.5–2
   флаг `films.dates_fetched`. Эндпойнт `/dates` (saveDates): пересборка DELETE→INSERT, ставит dates_fetched.
 - Проверено вживую (3 записи, ISO-дата, тип, примечание).
 
+### Решение 18. Парсер сборов /film/{id}/box/ (2026-06-07)
+Образец box-301.html (Матрица). Классический формат (st.kp.yandex.net), не Next.js → полная загрузка,
+ld/encyclopedic-table отсутствуют. Вверху — вкладки стран `.insert li` (активная `li.act`):
+для 301 «США» (на `/box/`) и «Россия» (`/box/rus/`). «Сборы по странам» = эти вкладки.
+- Структура: 4 секции, заголовок каждой — `<b>` в `td[style*="#f60"]`, секция = своя `<table cellpadding=3>`.
+  Строка = пара «label (`<b style=color:#666>…:`) → value (`<h3>`)»; `pct` = второй `<h3>` с «%»,
+  `note` = `<small>` («(% от сборов)», «(кинотеатров: 2 849, ~$9 753)»).
+  Секции 301: «Кассовые сборы» (США/др.страны/Россия/Общие), «Затраты» (Бюджет/Маркетинг/Итого),
+  «Первый уик-энд (США)», «Прокат (США)».
+- **Generic key-value** (как discovered_attrs): храним КАЖДУЮ строку, ничего не теряем, триаж потом.
+  Новая секция на будущих фильмах подхватится сама (итерируем все `#f60`-заголовки).
+- БД: `film_box(film_id, tab, ord, section, label, value, amount, currency, pct, note)` PK(film_id,tab,ord),
+  флаг `films.box_fetched`. `amount` — bigint; для **дат** (`dd.mm.yyyy`) `amount=NULL` (дата остаётся в `value`).
+  DELETE по (film,tab) → разные вкладки стран сосуществуют.
+- content.js: `extractBox()`/`maybeSendBox()` на `^/film/\d+/box(/[a-z]+)?/?$`, дедуп `SENT_BOX` по «filmId:tab»,
+  `tab` = текст активной вкладки. background `box`→`/box`. writer `saveBox()` + эндпойнт `/box`.
+- Проверено end-to-end (серверная часть): POST 10 строк 301 ×2 → 10 строк, идемпотентно, box_fetched=true,
+  дата-строка `amount=NULL` + note сохранён, $-суммы/проценты корректны. DOM-алгоритм валидирован
+  Python-симуляцией по box-301.html (4 секции, 10 строк); JS — зеркало, финальная проверка вживую.
+
+### Решение 19. box — страница ПО СТРАНАМ, добор каждой страны отдельно (2026-06-07)
+Уточнение пользователя: `/film/301/box/` не содержит детальных данных по России, а `/film/301/box/rus/` —
+по США (логично). Т.е. box устроен НЕ как `/cast/` (где одна страница = всё), а каждая вкладка
+(`.insert li`) несёт детальные секции только своей страны. Сводка «Кассовые сборы» (US/др./РФ/итого)
+есть на всех вкладках, но детали (уик-энды, прокат) — пострановые.
+**Поток (= предложение пользователя):**
+1. разобрать `/box/` (детали активной страны + сводка), `tab` = текст активной вкладки;
+2. со страницы прочитать вкладки стран и **добавить остальные `/box/<country>/` в очередь** —
+   отдельной записью на страну: `link_queue.kind='page:box:<slug>'`, id=filmId, title=url;
+3. при заходе на каждую страну — `extractBox()` пишет её строки (DELETE по `(film,tab)` → страны сосуществуют).
+- Реализация: content.js `boxCountryPages()` (на странице box собирает `.insert li a[href=/box/<slug>/]`),
+  шлёт в `/discover` как `pages:[{filmId, section:'box:'+slug, url}]`. Активную вкладку не добавляем
+  (её парсим прямо сейчас). Проверено на box-301.html: поймал `/film/301/box/rus/` → `box:rus`, активная «США».
+- `films.box_fetched` = «главная страница box разобрана (≥1 страна)»; пострановое покрытие смотреть так:
+  `SELECT kind,title FROM link_queue WHERE id=<film> AND kind LIKE 'page:box:%';` (что есть)
+  vs `SELECT DISTINCT tab FROM film_box WHERE film_id=<film>;` (что уже разобрано).
+- Замечание: сводка «Кассовые сборы» дублируется по вкладкам (хранится с разным `tab`) — допустимо.
+- Проверено на box-rus-301.html: активная вкладка «Россия»; секции «Первый уик-энд (Россия)»/
+  «Прокат (Россия)» (страновые), сводка та же. Новая строка «Продолжительность (нед.)» поймана generic.
+  Валюта: добавлено распознавание `руб.`/`€` (раньше только `$`) — `currency`. Дата проката → `amount=NULL`.
+  Вкладка США на rus-странице ведёт на `/box/type/usa/` (иной URL) — не берём: все страны
+  обнаруживаются с дефолтной `/box/`. End-to-end: tab «США» (10 строк) + «Россия» (11) сосуществуют, дублей нет.
+
+### Решение 20. Парсер студий/тех.данных /film/{id}/studio/ (2026-06-07)
+Образец studio-301.html (классический формат, без вкладок). На странице ДВЕ части — берём обе:
+1. **Тех. характеристики** (верхний блок `td[style*="tech-bg"]`): label(`<b>`)→value, **многозначные**
+   (строки-продолжения с пустым `<b>&nbsp;</b>` наследуют предыдущий label: Камера ×4, Формат… ×3).
+   → `film_tech(film_id, ord, label, value)` (generic key-value). Поля 301: Производство(годы), Съёмки,
+   Формат изображения, Камера, Формат копии, Формат съёмок, Изображение, Язык (15 строк).
+2. **Компании по секциям** (заголовок — `<b>` в `td[style*="#f60"]`, как у box): Производство/Спецэффекты/
+   Студия дубляжа/Прокат → роли production/effects/dubbing/distribution (неизвестную берём как есть).
+   → `film_studios(film_id, role, ord, company_kind, company_id, company_ref, name, note)`.
+- ⚠️ **Разные namespace ссылок** (важно!): производство/эффекты/дубляж — `m_act[studio]/ID/` (число);
+  **прокат** — `m_act[company]/ID/` (другое id-пространство!) и `m_act[company_en]/<slug>/` (слаг, без числа).
+  Поэтому `company_kind` (studio|company|company_en) + `company_ref` (сырой id/слаг) + `company_id`
+  (только число). Без kind смешивать id нельзя — это разные сущности.
+- `note` (font#999999) зависит от роли: у эффектов — описание («animatronic prosthetics»),
+  у проката — страна («Россия»/«США»). Храним как есть.
+- content.js: `extractStudio()`/`maybeSendStudio()` на `^/film/\d+/studio/?$`, дедуп `SENT_STUDIO`.
+  background `studio`→`/studio`. writer `saveStudio()` (DELETE→INSERT обеих таблиц) + флаг `films.studio_fetched`.
+- Проверено end-to-end: 15 компаний (prod 5/eff 6/dub 1/distr 3), Прокат с company/company_en (слаг
+  warnerbros сохранён), тех. 15 строк (многозначная Камера ×4), идемпотентно, studio_fetched=true.
+
+### Решение 21. Парсер связанных фильмов /film/{id}/other/ (2026-06-07)
+Образец other-301.html (классический формат; основной HTML «зашумлён» clstorage-скриптами, но связи —
+обычная разметка). Секции — заголовок `td.main_line` (цвет #f60): «Продолжение», «Спин-офф», «Отсылки к»,
+«Спародирован в», «Упоминается в», «Смонтировано в», … Типы варьируются от фильма к фильму (бывают
+Приквел/Ремейк/Сиквел и др.) → храним сырой заголовок как `relation` (нормализуем потом, как роли studio).
+- Заголовок и его фильмы — в ОДНОЙ таблице (`head.closest('table')`). Фильм — `div.item`:
+  `span.name a[/film/ID/]` (рус.назв.+год), `span.role` (оригинал). Год парсим из названия `(\d{4})\)`.
+- БД: `film_relations(film_id, relation, ord, related_id, title, title_orig, year)` PK(film_id,relation,ord),
+  флаг `films.other_fetched`. Сам связанный фильм в очередь НЕ дублируем — он и так ловится общим
+  сканером ссылок (`a[href*="/film/"]` → link_queue kind='film'); тут только типизированное ребро film→film.
+- content.js: `extractOther()`/`maybeSendOther()` на `^/film/\d+/other/?$`, дедуп `SENT_OTHER`.
+  background `other`→`/other`. writer `saveOther()` (DELETE→INSERT) + флаг.
+- Проверено end-to-end: 533 связи 301 в 6 типах (Упоминается в 338 / Спародирован в 134 / Отсылки к 55 /
+  Продолжение·Спин-офф·Смонтировано в по 2), год у всех 533, оригинал у 427, идемпотентно, other_fetched=true.
+
+### Решение 22. Парсер ключевых слов /film/{id}/keywords/ (2026-06-07)
+Образец keyword-301.html (классический формат). Простая разметка: `ul.keywordsList > li > span >
+a[/lists/m_act[keyword]/ID/]` с атрибутом `data-real-keyword` (чистый текст слова, запасной — текст ссылки).
+- БД: `film_keywords(film_id, ord, keyword_id, keyword)` PK(film_id,ord), флаг `films.keywords_fetched`.
+- content.js: `extractKeywords()`/`maybeSendKeywords()` на `^/film/\d+/keywords/?$`, дедуп `SENT_KW`.
+  Селектор `a[data-real-keyword][href*='m_act']` (надёжнее, чем скобки `[keyword]` в CSS). background
+  `keywords`→`/keywords`. writer `saveKeywords()` (DELETE→INSERT) + флаг.
+- Проверено end-to-end: 391 слово 301, все с id, идемпотентно, keywords_fetched=true.
+
+### Решение 23. Новый атрибут table:originals → колонка (2026-06-07)
+Самообнаружение сработало у пользователя: `originals = «DC Universe»` на фильме 401176 «Бэтмен: Рыцарь
+Готэма». Это «Первоисточник» (на чём основан фильм). Триаж: простое одно-значное поле строки таблицы
+(как budget/marketing/releases) → **колонка** `films.originals`.
+- Добавлено: схема (колонка), экстрактор (`originals: rowText("originals")`), content/writer (INSERT/UPDATE,
+  $29), `originals` → KNOWN_TABLE_KEYS, статус discovered_attrs → promoted. Бэкфилл из raw._allTable (401176).
+- Проверено: тест-POST с originals пишет колонку, newAttrs пуст (ключ теперь известный).
+
+### Решение 24. Рейтинг кинокритиков (мир/РФ) + IMDb с главной (2026-06-08)
+Вопрос пользователя: рейтинг кинокритиков нигде не писался (в БД был только рейтинг КП). Добавлен сбор
+со СВЕЖЕГО образца main-78871.html (React-DOM, классы захешированы — якоримся по стабильному):
+- **IMDb**: `.film-sub-rating` → `[class*="valueSection"]` («IMDb: 6.50») + `[class*="count"]` (262 000) →
+  колонки `films.imdb_value`, `films.imdb_count`.
+- **Критики**: `[class*="criticRatingSection"]` содержит несколько «баров» — по одному `h3` на бар
+  («Рейтинг кинокритиков в мире», «В России»). На бар: `pct` (`.film-rating-value [aria-hidden]`, «34%»),
+  `count`+`avg` (`[class*="countBlock"]`/`[class*="starValue"]`), `positive`/`negative`
+  (`[class*="greenBar"]`/`[class*="redBar"]`). → таблица `film_critics(film_id, scope, label, pct, count,
+  avg, positive, negative)` PK(film_id,scope). scope: world (/мире/) | ru (/росси/) | сырой label.
+- Якоря намеренно по подстроке semantic-части класса (`greenBar`/`countBlock`/…) — переживают смену хеша.
+  Главный рейтинг КП (число, без «%») не затрагивается — критики берём только внутри их секции.
+- content.js: блок в `extract()` (`imdb`, `critics`) → объект movie. writer `saveMovie`: imdb-колонки +
+  пересборка `film_critics` (в той же транзакции). Без отдельного эндпойнта/флага — идёт с /movie.
+- Проверено: 78871 → imdb 6.5/262000; critics world 34%/112/4.9/+38−74, ru 100%/3/+3−0 (avg РФ NULL).
+  ⚠️ Тестировал на реальном id и обнулил поля минимальным payload → восстановил из фикстуры; для тестов
+  upsert использовать ВЫКИДНОЙ id (999xxx), как в решении 23.
+
+**Добор существующих.** Критики/IMDb НЕ в raw (там только _allTable+_ld) → бэкфилл невозможен, нужен
+повторный заход на главную. Маркер — флаг `films.critics_checked` (ставится true при ЛЮБОМ сохранении
+главной новым кодом — даже если критиков нет, чтобы не висел вечно).
+
+**Уточнение (2026-06-08): переобход вшит в обычную очередь, отдельного блока нет.**
+Пользователь: не делать спец-механизм — просто чтобы старые фильмы шли в очереди, «обойду как обычно».
+Нюанс: вставить их в `link_queue` напрямую нельзя — очередь показывает только тех, кого ЕЩЁ нет в `films`.
+Поэтому `/queue` теперь отдаёт ДВЕ группы со своими лимитами: `films` (новые, из link_queue) и `recrawl`
+(`films WHERE raw IS NOT NULL AND critics_checked=false`). Панель рисует оба под-списка в одном блоке
+(переобход — оранжевым, с ↻). Отдельный `/recrawl`, `window.kp.recrawl`, оранжевый блок и его рефреш —
+удалены. Фильм уходит из «переобхода» сам, когда главная пересохранена. Проверено: /queue → 10 новых +
+12 переобход; синтаксис ok, висячих ссылок нет. На 2026-06-08 к переобходу 47 (часть уже пересохранена).
+
 ### Окружение / доступ к БД
 - psql: `/Applications/Postgres.app/Contents/Versions/17/bin/psql -h localhost -U mac -d kinopoisk`
 - writer: `node server/writer.js` (или env `DATABASE_URL`).

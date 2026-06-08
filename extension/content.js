@@ -157,6 +157,46 @@
     const ratingCount = ld && ld.aggregateRating ? num(ld.aggregateRating.ratingCount)
       : rc ? num((rc.getAttribute("aria-label") || "").replace(/[\s ]/g, "")) : null;
 
+    // IMDb (.film-sub-rating: «IMDb: 6.50» + «262 000 оценок»). Якоря семантические/по подстроке класса.
+    let imdb = null;
+    {
+      const sub = document.querySelector(".film-sub-rating");
+      if (sub) {
+        const vs = sub.querySelector('[class*="valueSection"]');
+        const mm = vs ? clean(vs.textContent).match(/imdb[:\s]*([\d.,]+)/i) : null;
+        const cEl = sub.querySelector('[class*="count"]');
+        const count = cEl ? num(clean(cEl.textContent).replace(/[\s ]/g, "")) : null;
+        if (mm) imdb = { value: num(mm[1].replace(",", ".")), count };
+      }
+    }
+
+    // рейтинг кинокритиков (criticRatingSection): мир + РФ. Каждый «бар» — h3 + полосы + значение.
+    const critics = [];
+    {
+      const sec = document.querySelector('[class*="criticRatingSection"]');
+      if (sec) {
+        for (const h3 of sec.querySelectorAll("h3")) {
+          const block = h3.parentElement;
+          if (!block) continue;
+          const label = clean(h3.textContent);
+          const scope = /мире/i.test(label) ? "world" : /росси/i.test(label) ? "ru" : label;
+          const valEl = block.querySelector('.film-rating-value [aria-hidden="true"]');
+          const green = block.querySelector('[class*="greenBar"]');
+          const red = block.querySelector('[class*="redBar"]');
+          const cb = block.querySelector('[class*="countBlock"]');
+          const star = block.querySelector('[class*="starValue"]');
+          critics.push({
+            scope, label,
+            pct: valEl ? num(clean(valEl.textContent)) : null,
+            count: cb ? num(clean(cb.textContent).replace(/[\s ]/g, "")) : null,
+            avg: star ? num(clean(star.textContent).replace(",", ".")) : null,
+            positive: green && clean(green.textContent) ? num(clean(green.textContent)) : null,
+            negative: red && clean(red.textContent) ? num(clean(red.textContent)) : 0,
+          });
+        }
+      }
+    }
+
     // описание: ld (полное) или meta[name=description] (обновляется на SPA), без ведущего эмодзи
     const description =
       (ld ? clean(ld.description) : null) ||
@@ -181,12 +221,15 @@
       titleOrig: (origEl ? clean(origEl.textContent) : "") || (ld ? clean(ld.alternateName) : "") || null,
       year: (ym ? Number(ym[1]) : null) || num(rowText("year")) || (ld ? num(ld.datePublished) : null),
       slogan: rowText("tagline"),
+      originals: rowText("originals"),     // «Первоисточник» (на чём основан фильм), напр. «DC Universe»
       genres: (rowText("genres") || "").split(",").map(clean).filter(Boolean),
       countries: (rowText("countries") || "").split(",").map(clean).filter(Boolean),
       duration: (ld ? num(ld.timeRequired) : null) || parseMinutes(rowText("duration")),
       ageRestriction: rowText("ageRestriction"),
       ratingMPAA: rowText("ratingMPAA") || (ld ? clean(ld.contentRating) : null),
       rating: ratingValue != null || ratingCount != null ? { value: ratingValue, count: ratingCount } : null,
+      imdb,
+      critics: critics.length ? critics : null,
       description,
       poster,
       crew: {
@@ -219,7 +262,7 @@
     };
   }
 
-  // ---------- панель: очередь (сверху) + статус (снизу) ----------
+  // ---------- панель: очередь (+ переобход) + статус ----------
   let panel, elQueue, elNew, elStatus;
   function ensurePanel() {
     if (panel) return panel;
@@ -264,23 +307,32 @@
     elStatus.style.display = text ? "block" : "none";
     elStatus.style.background = bg || "#555";
   }
-  function renderQueue(films) {
+  const esc = (s) => (s || "(без названия)").replace(/[<>&]/g, (c) =>
+    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  const linkRow = (f, color, mark) =>
+    `<a href="/film/${f.id}/" style="display:block;color:${color};text-decoration:none;padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${mark}#${f.id} — ${esc(f.title)}</a>`;
+  function renderQueue(data) {
     ensurePanel();
-    if (!films || !films.length) {
+    const films = (data && data.films) || [];
+    const recrawl = (data && data.recrawl) || [];
+    if (!films.length && !recrawl.length) {
       elQueue.innerHTML = '<div style="opacity:.6">очередь пуста</div>';
       return;
     }
-    let html = `<div style="opacity:.7;margin-bottom:4px">Очередь — новые фильмы (${films.length}):</div>`;
-    for (const f of films) {
-      const t = (f.title || "(без названия)").replace(/[<>&]/g, (c) =>
-        ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
-      html += `<a href="/film/${f.id}/" style="display:block;color:#7cc4ff;text-decoration:none;padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">#${f.id} — ${t}</a>`;
+    let html = "";
+    if (films.length) {
+      html += `<div style="opacity:.7;margin-bottom:4px">Очередь — новые фильмы (${films.length}):</div>`;
+      for (const f of films) html += linkRow(f, "#7cc4ff", "");
+    }
+    if (recrawl.length) {
+      html += `<div style="opacity:.7;margin:6px 0 4px;padding-top:6px;border-top:1px solid rgba(255,255,255,.15)">↻ Переобход — добор новых полей (${recrawl.length}):</div>`;
+      for (const f of recrawl) html += linkRow(f, "#ffb454", "↻ ");
     }
     elQueue.innerHTML = html;
   }
   function refreshQueue() {
     chrome.runtime.sendMessage({ type: "queue" }, (resp) => {
-      if (resp && resp.ok && resp.result) renderQueue(resp.result.films);
+      if (resp && resp.ok && resp.result) renderQueue(resp.result);
     });
   }
 
@@ -309,7 +361,7 @@
         setNewAttrs(r.newAttrs);
         if (r.newAttrs && r.newAttrs.length)
           console.warn("[kp] 🆕 новые атрибуты:", r.newAttrs.join(", "));
-        refreshQueue(); // фильм ушёл из очереди — обновим список
+        refreshQueue(); // фильм ушёл из очереди (или из переобхода) — обновим список
       } else {
         SEEN.delete(movie.id);
         setBadge(`✗ ошибка записи #${movie.id}`, "#cf222e");
@@ -412,6 +464,22 @@
     return m;
   }
 
+  // box — страница ПО СТРАНАМ: каждая вкладка (`.insert li`) несёт детали только своей страны,
+  // в отличие от /cast/ (всё на одной). Активная вкладка (li.act) = текущая (уже парсим);
+  // у остальных есть <a href="/film/{id}/box/<country>/"> → их добавляем в очередь отдельно,
+  // чтобы дойти до каждой страны. section='box:<slug>' → kind='page:box:<slug>' (по строке на страну).
+  function boxCountryPages() {
+    const out = [];
+    const root = document.querySelector(".block_left") || document;
+    for (const a of root.querySelectorAll('.insert li a[href*="/box/"]')) {
+      if (inPanel(a)) continue;
+      const mm = (a.getAttribute("href") || "").match(/\/film\/(\d+)\/box\/([a-z]+)\/?$/i);
+      if (!mm) continue;
+      out.push({ filmId: Number(mm[1]), section: "box:" + mm[2].toLowerCase(), url: mm[0] });
+    }
+    return out;
+  }
+
   // ---------- складирование обнаруженных ссылок в очередь ----------
   const sentLinks = new Set(); // 'film:ID' / 'person:ID' / 'page:ID:section' — уже отправленные
   function sendDiscover() {
@@ -424,6 +492,9 @@
     }
     for (const [key, p] of pagesOnPage()) {
       const k = "page:" + key; if (sentLinks.has(k)) continue; sentLinks.add(k); pages.push(p);
+    }
+    for (const p of boxCountryPages()) {                 // отдельные вкладки стран box
+      const k = "page:" + p.filmId + ":" + p.section; if (sentLinks.has(k)) continue; sentLinks.add(k); pages.push(p);
     }
     if (!films.length && !persons.length && !pages.length) return;
     chrome.runtime.sendMessage({ type: "discover", films, persons, pages }, () => refreshQueue());
@@ -558,6 +629,273 @@
     });
   }
 
+  // ---------- сборы: /film/{id}/box/ (+ вкладки стран /box/<country>/) ----------
+  // Классический формат: 4+ секции, заголовок каждой — <b> в td[style*="#f60"];
+  // строки = пары «label (<b>) → value (<h3>)»; pct — второй <h3> с «%», note — <small>.
+  // Снимаем КАЖДУЮ строку (как discovered_attrs) — ничего не теряем, триаж потом.
+  const SENT_BOX = new Set();                 // дедуп по "filmId:tab"
+  const boxAmount = (v) => {
+    if (!v) return null;
+    if (/\d{1,2}\.\d{1,2}\.\d{4}/.test(v)) return null;   // это дата, не сумма
+    const digits = (clean(v).match(/\d[\d ]*/) || [""])[0].replace(/\D/g, "");
+    return digits ? Number(digits) : null;
+  };
+
+  function extractBox() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/box(?:\/[a-z]+)?\/?$/);
+    if (!m) return null;
+    const filmId = Number(m[1]);
+    const root = document.querySelector(".block_left") || document;
+    const tabEl = root.querySelector(".insert li.act");
+    const tab = (tabEl ? clean(tabEl.textContent) : "") || "США";
+    const headers = root.querySelectorAll('td[style*="#f60"] b');  // заголовки секций
+    if (!headers.length) return null;
+    const rows = [];
+    let ord = 0;
+    const seenTables = new Set();
+    for (const hb of headers) {
+      const headTd = hb.closest("td");
+      const tableEl = hb.closest("table");
+      if (!tableEl || seenTables.has(tableEl)) continue;
+      seenTables.add(tableEl);
+      const section = clean(hb.textContent);
+      let label = null;
+      for (const tr of tableEl.querySelectorAll("tr")) {
+        if (headTd && tr.contains(headTd)) continue;        // строка-заголовок секции
+        const h3s = tr.querySelectorAll("h3");
+        if (h3s.length) {
+          const value = clean(h3s[0].textContent);
+          if (!value) continue;
+          let pct = null;
+          for (let i = 1; i < h3s.length; i++) {
+            const t = clean(h3s[i].textContent);
+            if (t.includes("%")) { const n = parseFloat(t.replace("%", "").replace(",", ".")); if (isFinite(n)) pct = n; }
+          }
+          const note = [...tr.querySelectorAll("small")].map((s) => clean(s.textContent)).filter(Boolean).join(" ") || null;
+          rows.push({
+            ord: ord++, section, label, value,
+            amount: boxAmount(value),
+            currency: value.includes("$") ? "$" : /руб/i.test(value) ? "руб." : /€/.test(value) ? "€" : null,
+            pct, note,
+          });
+        } else {
+          const b = tr.querySelector("b");
+          if (b) label = clean(b.textContent).replace(/:\s*$/, "");
+        }
+      }
+    }
+    return rows.length ? { filmId, tab, rows } : null;
+  }
+
+  function maybeSendBox() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/box(?:\/[a-z]+)?\/?$/);
+    if (!m) return;
+    const data = extractBox();
+    if (!data) return;
+    const key = data.filmId + ":" + data.tab;
+    if (SENT_BOX.has(key)) return;
+    SENT_BOX.add(key);
+    setBadge(`⏳ сборы #${data.filmId} (${data.tab})…`, "#b8860b");
+    chrome.runtime.sendMessage({ type: "box", filmId: data.filmId, tab: data.tab, rows: data.rows }, (resp) => {
+      if (chrome.runtime.lastError || !(resp && resp.ok)) {
+        SENT_BOX.delete(key);
+        setBadge(`✗ сборы #${data.filmId}`, "#cf222e");
+        return;
+      }
+      setBadge(`✓ сборы #${data.filmId} (${data.tab}): ${data.rows.length} стр.`, "#1a7f37");
+      console.log(`%c[kp] ✓ сборы #${data.filmId} (${data.tab}) — ${data.rows.length} строк`, "color:green");
+    });
+  }
+
+  // ---------- студии/тех.данные: /film/{id}/studio/ ----------
+  // Классический формат. Две части:
+  //  1) тех. характеристики (верхний блок td[style*="tech-bg"]): label(<b>)→value, многозначные
+  //     (строки-продолжения с пустым <b> наследуют предыдущий label);
+  //  2) компании по секциям (<b> в td[style*="#f60"]): Производство/Спецэффекты/Студия дубляжа/Прокат/…,
+  //     каждая компания = a[href*="/lists/m_act[studio]/ID/"] + note (font#999999).
+  const STUDIO_ROLEMAP = {
+    "Производство": "production", "Спецэффекты": "effects",
+    "Студия дубляжа": "dubbing", "Прокат": "distribution",
+  };
+  const SENT_STUDIO = new Set();
+
+  function extractStudio() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/studio\/?$/);
+    if (!m) return null;
+    const filmId = Number(m[1]);
+    const root = document.querySelector(".block_left") || document;
+
+    // 1) тех. характеристики
+    const tech = [];
+    const techTable = (() => {
+      const td = root.querySelector('td[style*="tech-bg"]');
+      return td ? td.querySelector("table") : null;
+    })();
+    if (techTable) {
+      let last = null, ord = 0;
+      for (const tr of techTable.querySelectorAll("tr")) {
+        const tds = tr.querySelectorAll(":scope > td");
+        if (tds.length < 2) continue;
+        let label = clean(tds[0].textContent).replace(/:\s*$/, "");
+        const value = clean(tds[1].textContent);
+        if (!label) label = last; else last = label;
+        if (!value) continue;
+        tech.push({ ord: ord++, label: label || null, value });
+      }
+    }
+
+    // 2) компании по секциям
+    const studios = [];
+    const seenTables = new Set();
+    for (const hb of root.querySelectorAll('td[style*="#f60"] b')) {
+      const tableEl = hb.closest("table");
+      if (!tableEl || seenTables.has(tableEl)) continue;
+      seenTables.add(tableEl);
+      const raw = clean(hb.textContent).replace(/:\s*$/, "");
+      const role = STUDIO_ROLEMAP[raw] || raw;
+      let ord = 0;
+      for (const a of tableEl.querySelectorAll('a[href*="/lists/m_act"]')) {
+        const href = a.getAttribute("href") || "";
+        // m_act[studio]/35/, m_act[company]/341/, m_act[company_en]/warnerbros/ — разные namespace
+        const km = href.match(/m_act\[([a-z_]+)\]\/([^/]+)\//i);
+        const kind = km ? km[1].toLowerCase() : null;
+        const ref = km ? km[2] : null;                       // сырой идентификатор (число или слаг)
+        const name = clean(a.textContent);
+        if (!name) continue;
+        const td = a.closest("td");
+        const fontEl = td ? td.querySelector("font") : null; // описание (эффекты) или страна (прокат)
+        const note = fontEl ? clean(fontEl.textContent) : "";
+        studios.push({
+          role, ord: ord++,
+          companyKind: kind, companyRef: ref,
+          companyId: ref && /^\d+$/.test(ref) ? Number(ref) : null,
+          name, note: note || null,
+        });
+      }
+    }
+
+    return (tech.length || studios.length) ? { filmId, tech, studios } : null;
+  }
+
+  function maybeSendStudio() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/studio\/?$/);
+    if (!m) return;
+    const filmId = Number(m[1]);
+    if (SENT_STUDIO.has(filmId)) return;
+    const data = extractStudio();
+    if (!data) return;
+    SENT_STUDIO.add(filmId);
+    setBadge(`⏳ студии #${filmId}…`, "#b8860b");
+    chrome.runtime.sendMessage({ type: "studio", filmId, tech: data.tech, studios: data.studios }, (resp) => {
+      if (chrome.runtime.lastError || !(resp && resp.ok)) {
+        SENT_STUDIO.delete(filmId);
+        setBadge(`✗ студии #${filmId}`, "#cf222e");
+        return;
+      }
+      setBadge(`✓ студии #${filmId}: ${data.studios.length} комп., ${data.tech.length} тех.`, "#1a7f37");
+      console.log(`%c[kp] ✓ студии #${filmId} — ${data.studios.length} компаний, ${data.tech.length} тех.строк`, "color:green");
+    });
+  }
+
+  // ---------- связанные фильмы: /film/{id}/other/ ----------
+  // Классический формат. Секции — заголовок `td.main_line` (#f60): «Продолжение», «Спин-офф»,
+  // «Отсылки к», «Спародирован в», «Упоминается в», «Смонтировано в», … (типы варьируются).
+  // Заголовок и его фильмы лежат в ОДНОЙ таблице; фильм — `div.item` со `span.name a[/film/ID/]`
+  // (назв.+год) и `span.role` (оригинал). Тип связи = сырой текст заголовка (нормализуем потом).
+  const SENT_OTHER = new Set();
+  const yearFrom = (t) => { const m = (t || "").match(/(\d{4})\)/); return m ? Number(m[1]) : null; };
+
+  function extractOther() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/other\/?$/);
+    if (!m) return null;
+    const filmId = Number(m[1]);
+    const rels = [];
+    const seenTables = new Set();
+    for (const head of document.querySelectorAll("td.main_line")) {
+      const relation = clean(head.textContent);
+      if (!relation) continue;
+      const tableEl = head.closest("table");
+      if (!tableEl || seenTables.has(tableEl)) continue;
+      seenTables.add(tableEl);
+      let ord = 0;
+      for (const item of tableEl.querySelectorAll("div.item")) {
+        const a = item.querySelector('span.name a[href*="/film/"]');
+        if (!a) continue;
+        const rid = idFromFilm(a.getAttribute("href"));
+        const title = clean(a.textContent);
+        const roleEl = item.querySelector("span.role");
+        rels.push({
+          relation, ord: ord++, relatedId: rid,
+          title: title || null,
+          titleOrig: roleEl ? clean(roleEl.textContent) || null : null,
+          year: yearFrom(title),
+        });
+      }
+    }
+    return rels.length ? { filmId, relations: rels } : null;
+  }
+
+  function maybeSendOther() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/other\/?$/);
+    if (!m) return;
+    const filmId = Number(m[1]);
+    if (SENT_OTHER.has(filmId)) return;
+    const data = extractOther();
+    if (!data) return;
+    SENT_OTHER.add(filmId);
+    setBadge(`⏳ связи #${filmId}…`, "#b8860b");
+    chrome.runtime.sendMessage({ type: "other", filmId, relations: data.relations }, (resp) => {
+      if (chrome.runtime.lastError || !(resp && resp.ok)) {
+        SENT_OTHER.delete(filmId);
+        setBadge(`✗ связи #${filmId}`, "#cf222e");
+        return;
+      }
+      setBadge(`✓ связи #${filmId}: ${data.relations.length}`, "#1a7f37");
+      console.log(`%c[kp] ✓ связи #${filmId} — ${data.relations.length} фильмов`, "color:green");
+    });
+  }
+
+  // ---------- ключевые слова: /film/{id}/keywords/ ----------
+  // Классический формат. `ul.keywordsList > li > span > a[/lists/m_act[keyword]/ID/]`,
+  // текст слова — в атрибуте data-real-keyword (запасной — текст ссылки).
+  const SENT_KW = new Set();
+
+  function extractKeywords() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/keywords\/?$/);
+    if (!m) return null;
+    const filmId = Number(m[1]);
+    const kws = [];
+    let ord = 0;
+    for (const a of document.querySelectorAll("a[data-real-keyword][href*='m_act']")) {
+      const href = a.getAttribute("href") || "";
+      const idm = href.match(/m_act\[keyword\]\/(\d+)/);
+      const keyword = clean(a.getAttribute("data-real-keyword") || a.textContent);
+      if (!keyword) continue;
+      kws.push({ ord: ord++, keywordId: idm ? Number(idm[1]) : null, keyword });
+    }
+    return kws.length ? { filmId, keywords: kws } : null;
+  }
+
+  function maybeSendKeywords() {
+    const m = location.pathname.match(/^\/film\/(\d+)\/keywords\/?$/);
+    if (!m) return;
+    const filmId = Number(m[1]);
+    if (SENT_KW.has(filmId)) return;
+    const data = extractKeywords();
+    if (!data) return;
+    SENT_KW.add(filmId);
+    setBadge(`⏳ ключ.слова #${filmId}…`, "#b8860b");
+    chrome.runtime.sendMessage({ type: "keywords", filmId, keywords: data.keywords }, (resp) => {
+      if (chrome.runtime.lastError || !(resp && resp.ok)) {
+        SENT_KW.delete(filmId);
+        setBadge(`✗ ключ.слова #${filmId}`, "#cf222e");
+        return;
+      }
+      setBadge(`✓ ключ.слова #${filmId}: ${data.keywords.length}`, "#1a7f37");
+      console.log(`%c[kp] ✓ ключевые слова #${filmId} — ${data.keywords.length}`, "color:green");
+    });
+  }
+
   // ---------- консольный API ----------
   window.kp = {
     status: () => lastStatus || { note: "ещё не записан в этой сессии", currentId: consistentId() },
@@ -585,6 +923,10 @@
       schedule();                                   // главная фильма: извлечение/отправка
       maybeSendCast();                              // /film/{id}/cast/: полный каст
       maybeSendDates();                             // /film/{id}/dates/: премьеры/релизы
+      maybeSendBox();                               // /film/{id}/box/: сборы/затраты/уикенды
+      maybeSendStudio();                            // /film/{id}/studio/: компании + тех.данные
+      maybeSendOther();                             // /film/{id}/other/: связанные фильмы
+      maybeSendKeywords();                          // /film/{id}/keywords/: ключевые слова
       if (_ticks % 2 === 0) { markLinks(); sendDiscover(); } // подсветка/очередь — реже (3 c)
     } catch (e) {
       dbg("tick error:", e && e.message);

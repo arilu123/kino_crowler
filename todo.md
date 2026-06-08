@@ -23,10 +23,14 @@
 - [ ] Парсеры подстраниц (по очереди kind='page:*'):
   - [x] cast `/film/{id}/cast/` — полный каст + вся группа → full_cast_fetched=true (роли: +voice/voice_director/translator; +character, +persons.name_orig)
   - [x] dates `/film/{id}/dates/` — все премьеры/релизы по странам (table film_dates, dates_fetched)
-  - [ ] box `/film/{id}/box/` — сборы детально
-  - [ ] studio `/film/{id}/studio/` — студии (новое)
-  - [ ] keywords `/film/{id}/keywords/` — ключевые слова (новое)
-  - [ ] other `/film/{id}/other/` — сиквелы/приквелы/ремейки (связи)
+  - [x] box `/film/{id}/box/` — сборы детально (film_box, box_fetched; generic key-value).
+        ПО СТРАНАМ: каждая вкладка = своя страна; добор остальных через очередь `page:box:<slug>`,
+        парсинг каждой при заходе (`tab`=страна). Покрытие: `link_queue 'page:box:%'` vs `film_box.tab`.
+  - [x] studio `/film/{id}/studio/` — компании (film_studios: роли + company_kind/ref для разных
+        namespace) + тех.характеристики (film_tech, многозначные), studio_fetched
+  - [x] keywords `/film/{id}/keywords/` — ключевые слова (film_keywords: id+текст), keywords_fetched
+  - [x] other `/film/{id}/other/` — связанные фильмы (film_relations: типизированные рёбра film→film,
+        сырой тип секции; year/title_orig), other_fetched. Связанные фильмы и так идут в link_queue.
   - [ ] опц.: votes, rn/R, video
 - [ ] Экстрактор персон `/name/{id}/` → обогащение persons (enriched=true)
 - [ ] Структура для наград (ld.award) и видео-ссылок (ld.video) — сейчас deferred в raw

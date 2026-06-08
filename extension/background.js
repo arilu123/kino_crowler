@@ -40,4 +40,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     post("/dates", { filmId: msg.filmId, dates: msg.dates }, sendResponse);
     return true; // async
   }
+  if (msg && msg.type === "box") {
+    post("/box", { filmId: msg.filmId, tab: msg.tab, rows: msg.rows }, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "studio") {
+    post("/studio", { filmId: msg.filmId, tech: msg.tech, studios: msg.studios }, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "other") {
+    post("/other", { filmId: msg.filmId, relations: msg.relations }, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "keywords") {
+    post("/keywords", { filmId: msg.filmId, keywords: msg.keywords }, sendResponse);
+    return true; // async
+  }
 });

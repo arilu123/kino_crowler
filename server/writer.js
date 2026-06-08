@@ -41,6 +41,7 @@ const KNOWN_TABLE_KEYS = new Set([
   "ageRestriction", "ratingMPAA", "duration",
   "blueRayRelease", "digitalRelease", "reRelease",  // решение 9: вынесены в колонки
   "marketing",                                      // решение 14: расходы на маркетинг
+  "originals",                                      // первоисточник (на чём основан фильм)
 ]);
 const KNOWN_LD_KEYS = new Set([
   "@context", "@type", "url", "name", "alternativeHeadline", "alternateName",
@@ -110,10 +111,11 @@ async function saveMovie(movie) {
          box_budget, box_marketing, box_usa, box_world, box_rus, audience,
          premiere_ru, premiere_world, premiere_dvd,
          release_bluray, release_digital, re_release,
-         source_url, raw, poster, updated_at
+         source_url, raw, poster, originals, imdb_value, imdb_count,
+         critics_checked, updated_at
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28, now()
+         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31, true, now()
        )
        ON CONFLICT (id) DO UPDATE SET
          title=$2, title_orig=$3, year=$4, slogan=$5, genres=$6, countries=$7,
@@ -122,7 +124,8 @@ async function saveMovie(movie) {
          box_usa=$16, box_world=$17, box_rus=$18, audience=$19, premiere_ru=$20,
          premiere_world=$21, premiere_dvd=$22,
          release_bluray=$23, release_digital=$24, re_release=$25,
-         source_url=$26, raw=$27, poster=$28,
+         source_url=$26, raw=$27, poster=$28, originals=$29,
+         imdb_value=$30, imdb_count=$31, critics_checked=true,
          updated_at=now()
        RETURNING crawled_at, updated_at, full_cast_fetched`,
       [
@@ -134,6 +137,8 @@ async function saveMovie(movie) {
         pr.world ?? null, pr.dvd ?? null,
         rel.bluray ?? null, rel.digital ?? null, rel.re ?? null,
         (movie.source && movie.source.url) || null, JSON.stringify(movie), poster,
+        movie.originals ?? null,
+        (movie.imdb && movie.imdb.value) ?? null, (movie.imdb && movie.imdb.count) ?? null,
       ]
     );
 
@@ -157,6 +162,20 @@ async function saveMovie(movie) {
           [movie.id, p.id, p.role, p.ord]
         );
       }
+    }
+
+    // рейтинг кинокритиков (мир/РФ) — пересобираем
+    await client.query("DELETE FROM film_critics WHERE film_id=$1", [movie.id]);
+    for (const c of movie.critics || []) {
+      if (!c || !c.scope) continue;
+      await client.query(
+        `INSERT INTO film_critics (film_id, scope, label, pct, count, avg, positive, negative)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (film_id, scope) DO UPDATE SET
+           label=EXCLUDED.label, pct=EXCLUDED.pct, count=EXCLUDED.count, avg=EXCLUDED.avg,
+           positive=EXCLUDED.positive, negative=EXCLUDED.negative`,
+        [movie.id, c.scope, c.label || null, c.pct ?? null, c.count ?? null,
+         c.avg ?? null, c.positive ?? null, c.negative ?? null]
+      );
     }
 
     const newAttrs = await recordDiscoveries(client, movie);
@@ -260,6 +279,128 @@ async function saveDates({ filmId, dates }) {
   }
 }
 
+// сборы со страницы /film/{id}/box/ (+ вкладки стран) — пересобирает film_box по (film,tab)
+async function saveBox({ filmId, tab, rows }) {
+  filmId = Number(filmId);
+  if (!filmId || !Array.isArray(rows) || !rows.length) throw new Error("bad box");
+  tab = tab || "США";
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO films (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [filmId]);
+    await client.query("DELETE FROM film_box WHERE film_id=$1 AND tab=$2", [filmId, tab]);
+    for (const r of rows) {
+      await client.query(
+        `INSERT INTO film_box (film_id, tab, ord, section, label, value, amount, currency, pct, note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [filmId, tab, r.ord, r.section || null, r.label || null, r.value || null,
+         r.amount ?? null, r.currency || null, r.pct ?? null, r.note || null]
+      );
+    }
+    await client.query("UPDATE films SET box_fetched=true, updated_at=now() WHERE id=$1", [filmId]);
+    await client.query("COMMIT");
+    return { filmId, tab, rows: rows.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// студии + тех.данные со страницы /film/{id}/studio/ — пересобирает film_studios и film_tech
+async function saveStudio({ filmId, tech, studios }) {
+  filmId = Number(filmId);
+  tech = Array.isArray(tech) ? tech : [];
+  studios = Array.isArray(studios) ? studios : [];
+  if (!filmId || (!tech.length && !studios.length)) throw new Error("bad studio");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO films (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [filmId]);
+
+    await client.query("DELETE FROM film_studios WHERE film_id=$1", [filmId]);
+    for (const s of studios) {
+      await client.query(
+        `INSERT INTO film_studios (film_id, role, ord, company_kind, company_id, company_ref, name, note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
+        [filmId, s.role, s.ord, s.companyKind || null, s.companyId ?? null,
+         s.companyRef || null, s.name || null, s.note || null]
+      );
+    }
+
+    await client.query("DELETE FROM film_tech WHERE film_id=$1", [filmId]);
+    for (const t of tech) {
+      await client.query(
+        `INSERT INTO film_tech (film_id, ord, label, value) VALUES ($1,$2,$3,$4)`,
+        [filmId, t.ord, t.label || null, t.value || null]
+      );
+    }
+
+    await client.query("UPDATE films SET studio_fetched=true, updated_at=now() WHERE id=$1", [filmId]);
+    await client.query("COMMIT");
+    return { filmId, studios: studios.length, tech: tech.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// связанные фильмы со страницы /film/{id}/other/ — пересобирает film_relations
+async function saveOther({ filmId, relations }) {
+  filmId = Number(filmId);
+  if (!filmId || !Array.isArray(relations) || !relations.length) throw new Error("bad other");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO films (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [filmId]);
+    await client.query("DELETE FROM film_relations WHERE film_id=$1", [filmId]);
+    for (const r of relations) {
+      await client.query(
+        `INSERT INTO film_relations (film_id, relation, ord, related_id, title, title_orig, year)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+        [filmId, r.relation, r.ord, r.relatedId ?? null, r.title || null, r.titleOrig || null, r.year ?? null]
+      );
+    }
+    await client.query("UPDATE films SET other_fetched=true, updated_at=now() WHERE id=$1", [filmId]);
+    await client.query("COMMIT");
+    return { filmId, relations: relations.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// ключевые слова со страницы /film/{id}/keywords/ — пересобирает film_keywords
+async function saveKeywords({ filmId, keywords }) {
+  filmId = Number(filmId);
+  if (!filmId || !Array.isArray(keywords) || !keywords.length) throw new Error("bad keywords");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO films (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [filmId]);
+    await client.query("DELETE FROM film_keywords WHERE film_id=$1", [filmId]);
+    for (const k of keywords) {
+      await client.query(
+        `INSERT INTO film_keywords (film_id, ord, keyword_id, keyword) VALUES ($1,$2,$3,$4)`,
+        [filmId, k.ord, k.keywordId ?? null, k.keyword || null]
+      );
+    }
+    await client.query("UPDATE films SET keywords_fetched=true, updated_at=now() WHERE id=$1", [filmId]);
+    await client.query("COMMIT");
+    return { filmId, keywords: keywords.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 // какие из переданных id фильмов уже есть в БД (для подсветки посещённых)
 async function knownFilmIds(ids) {
   const clean = (ids || []).map(Number).filter(Boolean);
@@ -293,18 +434,28 @@ async function discoverLinks({ films, persons, pages }) {
   return { added: rows.length };
 }
 
-// первые N непосещённых фильмов из очереди (которых ещё нет в films), FIFO
-async function queueFilms(limit = 10) {
-  const r = await pool.query(
-    `SELECT q.id, q.title
-       FROM link_queue q
+// очередь для панели: две группы со своими лимитами —
+//  films   — НОВЫЕ (в link_queue, ещё нет в films), FIFO;
+//  recrawl — К ПЕРЕОБХОДУ (главная снята, но critics_checked=false: добор критиков/IMDb и пр.).
+// По мере захода фильм уходит из своей группы сам (попал в films / выставлен critics_checked).
+async function queueFilms(nLimit = 10, rLimit = 12) {
+  const nw = await pool.query(
+    `SELECT q.id, q.title FROM link_queue q
       WHERE q.kind = 'film'
         AND NOT EXISTS (SELECT 1 FROM films f WHERE f.id = q.id)
-      ORDER BY q.first_seen
-      LIMIT $1`,
-    [limit]
+      ORDER BY q.first_seen LIMIT $1`,
+    [nLimit]
   );
-  return r.rows.map((x) => ({ id: Number(x.id), title: x.title }));
+  const rc = await pool.query(
+    `SELECT id, title FROM films
+      WHERE raw IS NOT NULL AND critics_checked = false
+      ORDER BY id LIMIT $1`,
+    [rLimit]
+  );
+  return {
+    films: nw.rows.map((x) => ({ id: Number(x.id), title: x.title })),
+    recrawl: rc.rows.map((x) => ({ id: Number(x.id), title: x.title })),
+  };
 }
 
 function readBody(req) {
@@ -365,6 +516,62 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && req.url === "/box") {
+    try {
+      const result = await saveBox(JSON.parse(await readBody(req)));
+      console.log(`✓ сборы ${result.filmId} (${result.tab}, ${result.rows} стр.)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ box", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/studio") {
+    try {
+      const result = await saveStudio(JSON.parse(await readBody(req)));
+      console.log(`✓ студии ${result.filmId} (${result.studios} комп., ${result.tech} тех.)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ studio", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/other") {
+    try {
+      const result = await saveOther(JSON.parse(await readBody(req)));
+      console.log(`✓ связи ${result.filmId} (${result.relations} фильмов)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ other", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/keywords") {
+    try {
+      const result = await saveKeywords(JSON.parse(await readBody(req)));
+      console.log(`✓ ключ.слова ${result.filmId} (${result.keywords})`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ keywords", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
   if (req.method === "POST" && req.url === "/known") {
     try {
       const { ids } = JSON.parse(await readBody(req));
@@ -393,7 +600,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/queue") {
     try {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ films: await queueFilms(10) }));
+      res.end(JSON.stringify(await queueFilms()));
     } catch (e) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
