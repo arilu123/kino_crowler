@@ -3,12 +3,19 @@
  * extract() со страницы /film/{id}/ + отправка (send) и планировщик (schedule).
  * Часть content-скрипта (загрузка по порядку из manifest.json, общий isolated-world scope).
  */
+// главная фильма: получаем id (синхронно с телом) и его ld, дальше — общий разбор страницы.
 function extract() {
   const filmId = consistentId();
   if (!filmId) return null;
+  return extractFromPage(filmId, currentLd());
+}
+
+// общий разбор Next.js-страницы «энциклопедии» (формат идентичен у фильма и сериала):
+// принимает уже подтверждённый id и соответствующий ld (может быть null на SPA-переходе).
+// Используется и для /film/, и для /series/ (см. content-series.js).
+function extractFromPage(filmId, ld) {
   const table = document.querySelector('[data-test-id="encyclopedic-table"]');
   if (!table) return null;                 // данные ещё не отрисованы
-  const ld = currentLd();                  // не null только при полной загрузке (совпал с адресом)
 
   const row = (tid) => table.querySelector(`[data-test-id="${tid}"]`);
   const rowText = (tid) => {

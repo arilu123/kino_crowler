@@ -29,11 +29,15 @@ let _ticks = 0;
 function tick() {
   try {
     schedule();                                   // главная фильма: извлечение/отправка
+    scheduleSeries();                             // главная сериала: /series/{id}/
     maybeSendCast();                              // /film/{id}/cast/: полный каст
     maybeSendDates();                             // /film/{id}/dates/: премьеры/релизы
     maybeSendBox();                               // /film/{id}/box/: сборы/затраты/уикенды
     maybeSendStudio();                            // /film/{id}/studio/: компании + тех.данные
     maybeSendOther();                             // /film/{id}/other/: связанные фильмы
+    maybeSendLike();                              // /film/{id}/like/: похожие фильмы
+    maybeSendSeriesCast();                        // /series/{id}/cast/: полный каст сериала
+    maybeSendEpisodes();                          // /series|film/{id}/episodes/: эпизоды сериала
     maybeSendKeywords();                          // /film/{id}/keywords/: ключевые слова
     maybeSendAwards();                             // /film/{id}/awards/: награды/номинации
     maybeSendPerson();                             // /name/{id}/: обогащение персоны

@@ -47,8 +47,19 @@
      и тех. характеристики → `film_tech`, `films.studio_fetched=true`.
    - На `/film/{id}/other/` — связанные фильмы (продолжения/спин-оффы/отсылки/упоминания/…) →
      `film_relations`, `films.other_fetched=true`.
+   - На `/film/{id}/like/` — похожие фильмы (подборка) → `film_similar`, `films.like_fetched=true`;
+     сами фильмы также попадают в очередь (добор новых) общим сканером ссылок.
    - На `/film/{id}/keywords/` — ключевые слова (теги) → `film_keywords`, `films.keywords_fetched=true`.
    - На `/film/{id}/awards/` — награды/премии/номинации → `film_awards`, `films.awards_fetched=true`.
+   - На `/series/{id}/` — главная **сериала** (формат как у фильма) → отдельные таблицы `series`
+     и `series_credits` (id-пространство сериалов и фильмов пересекается, поэтому держим раздельно).
+     Ссылки на сериалы с любых страниц копятся в очередь как `kind='series'`; туда же детерминированно
+     ставятся его подстраницы `page:series:cast` и `page:series:episodes` (URL выводятся из id, т.к. на
+     странице сериала ссылки на них ведут в /film/-неймспейс). Всё в одной `link_queue` — обход отдельным проходом.
+   - На `/series/{id}/cast/` — полный каст сериала (та же страница, что у фильма) → `series_credits`,
+     `series.full_cast_fetched=true`.
+   - На `/series|film/{id}/episodes/` — сезоны и эпизоды (название/оригинал/дата выхода) →
+     `series_episodes`, `series.episodes_fetched=true`.
    - На `/name/{id}/` — обогащение персоны (пол, даты, место рожд., рост, профессии, жанры,
      фильмография) → колонки `persons.*`, `persons.enriched=true`.
    - На главной также снимаются рейтинг кинокритиков (мир/РФ) → `film_critics` и IMDb → `films.imdb_*`.
@@ -86,9 +97,11 @@
   `content-main.js` обязан быть последним — в нём опросный цикл `tick()`):
   - `content-core.js` — состояние сессии, утилиты, разбор id/ld, парс дат, обмен с writer (`commitPage`).
   - `content-panel.js` — плавающая панель (очередь, переобход, бейдж, новые атрибуты).
-  - `content-film.js` — главная фильма `/film/{id}/`: `extract()` + `send`/`schedule`.
-  - `content-discover.js` — сбор ссылок, подсветка посещённых, отправка в очередь.
-  - `content-subpages.js` — `/cast/ /dates/ /box/ /studio/ /other/ /keywords/ /awards/`.
+  - `content-film.js` — главная фильма `/film/{id}/`: `extract()` + общий `extractFromPage()` + `send`/`schedule`.
+  - `content-series.js` — главная сериала `/series/{id}/`: переиспользует `extractFromPage()` → `series`/`series_credits`.
+  - `content-discover.js` — сбор ссылок (фильмы/персоны/сериалы), подсветка посещённых, отправка в очередь.
+  - `content-subpages.js` — `/cast/ /dates/ /box/ /studio/ /other/ /like/ /keywords/ /awards/` +
+    каст сериала `/series/{id}/cast/` и эпизоды `/series|film/{id}/episodes/`.
   - `content-person.js` — `/name/{id}/` (формат Next.js).
   - `content-main.js` — консольный API `window.kp` и цикл `tick()` (точка входа).
 - `background.js` — POST данных писателю (обходит CORS/CSP страницы).

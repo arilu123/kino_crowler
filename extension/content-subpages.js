@@ -13,10 +13,9 @@ const CAST_ROLEMAP = {
 };
 const SENT_CAST = new Set();
 
-function extractCast() {
-  const m = location.pathname.match(/^\/film\/(\d+)\/cast\/?$/);
-  if (!m) return null;
-  const filmId = Number(m[1]);
+// разбор DOM каста (страница идентична у фильма и сериала) → массив credits или null.
+// Вынесено отдельно, чтобы переиспользовать на /series/{id}/cast/ (см. maybeSendSeriesCast).
+function parseCastNodes() {
   const nodes = document.querySelectorAll("a[name], .dub");
   if (!nodes.length) return null;
   let role = null;
@@ -45,7 +44,14 @@ function extractCast() {
       role, character, ord: ord[role]++,
     });
   }
-  return credits.length ? { filmId, credits } : null;
+  return credits.length ? credits : null;
+}
+
+function extractCast() {
+  const m = location.pathname.match(/^\/film\/(\d+)\/cast\/?$/);
+  if (!m) return null;
+  const credits = parseCastNodes();
+  return credits ? { filmId: Number(m[1]), credits } : null;
 }
 
 function maybeSendCast() {
@@ -321,6 +327,66 @@ function maybeSendOther() {
     `✓ связи #${filmId} — ${data.relations.length} фильмов`);
 }
 
+// ---------- похожие фильмы: /film/{id}/like/ ----------
+// «Похожие фильмы» — основной список в таблице `.ten_items`; каждый фильм = `tr[id^="tr_"]`
+// с двумя td: постер (`a[/film/ID/] > img[alt="RU (Orig, year)"]`) и текст
+// (`a.all[/film/ID/]` = RU-название, затем `<span>Orig,  (YYYY) NNN мин.</span>`).
+// Порядок на странице = релевантность по версии Сайта. Сами фильмы общий сканер ссылок
+// (filmsOnPage) кладёт в очередь — так добираем новые фильмы; тут пишем типизированное ребро.
+// ВНИМАНИЕ: на странице есть и побочные полосы ссылок (сайдбар Top-250, «Вы недавно смотрели») —
+// поэтому строго ограничиваемся контейнером `.ten_items`.
+const SENT_LIKE = new Set();
+
+function extractLike() {
+  const m = location.pathname.match(/^\/film\/(\d+)\/like\/?$/);
+  if (!m) return null;
+  const filmId = Number(m[1]);
+  const root = document.querySelector(".ten_items");
+  if (!root) return null;
+  const out = [];
+  let ord = 0;
+  for (const tr of root.querySelectorAll('tr[id^="tr_"]')) {
+    // строго ссылка-название на ФИЛЬМ. Строки-сериалы (a.all → /series/ID/) так отсеиваются:
+    // /series/ вне текущего scope проекта (idFromFilm их не разбирает).
+    const titleA = tr.querySelector('a.all[href*="/film/"]');
+    if (!titleA) continue;
+    const sid = idFromFilm(titleA.getAttribute("href"));
+    if (!sid || sid === filmId) continue;
+    const title = clean(titleA.textContent) || null;  // RU-название
+    // оригинал + год — в <span> сразу после названия: «Inception,  (2010) 148 мин.»
+    let titleOrig = null, year = null;
+    const sib = titleA && titleA.nextElementSibling;
+    if (sib) {
+      const raw = clean(sib.textContent);
+      const ym = raw.match(/\((\d{4})\)/); if (ym) year = Number(ym[1]);
+      const orig = raw.replace(/\s*\(?\d{4}\)?.*$/, "").replace(/,\s*$/, "").trim();
+      titleOrig = orig || null;
+    }
+    // запасной источник года — alt постера «RU (Orig, year)»
+    if (year == null) {
+      const alt = (tr.querySelector("img[alt]") || {}).alt || "";
+      const ym2 = alt.match(/(\d{4})/); if (ym2) year = Number(ym2[1]);
+    }
+    out.push({ ord: ord++, similarId: sid, title, titleOrig, year });
+  }
+  return out.length ? { filmId, similar: out } : null;
+}
+
+function maybeSendLike() {
+  const m = location.pathname.match(/^\/film\/(\d+)\/like\/?$/);
+  if (!m) return;
+  const filmId = Number(m[1]);
+  if (SENT_LIKE.has(filmId)) return;
+  const data = extractLike();
+  if (!data) return;
+  commitPage(SENT_LIKE, filmId,
+    `⏳ похожие #${filmId}…`,
+    `✓ похожие #${filmId}: ${data.similar.length}`,
+    `✗ похожие #${filmId}`,
+    { type: "like", filmId, similar: data.similar },
+    `✓ похожие #${filmId} — ${data.similar.length} фильмов`);
+}
+
 // ---------- ключевые слова: /film/{id}/keywords/ ----------
 // Классический формат. `ul.keywordsList > li > span > a[/lists/m_act[keyword]/ID/]`,
 // текст слова — в атрибуте data-real-keyword (запасной — текст ссылки).
@@ -432,4 +498,78 @@ function maybeSendAwards() {
     `✗ награды #${filmId}`,
     { type: "awards", filmId, awards: data.awards },
     `✓ награды #${filmId} — ${data.awards.length} строк`);
+}
+
+// ---------- полный каст СЕРИАЛА: /series/{id}/cast/ ----------
+// Страница идентична фильмовому касту (общая для /film/ и /series/), поэтому разбор тот же
+// (parseCastNodes). Отличие — пишем в series_credits (отдельное id-пространство сериалов).
+const SENT_SERIES_CAST = new Set();
+
+function maybeSendSeriesCast() {
+  const m = location.pathname.match(/^\/series\/(\d+)\/cast\/?$/);
+  if (!m) return;
+  const seriesId = Number(m[1]);
+  if (SENT_SERIES_CAST.has(seriesId)) return;
+  const credits = parseCastNodes();
+  if (!credits) return;
+  commitPage(SENT_SERIES_CAST, seriesId,
+    `⏳ каст сериала #${seriesId}…`,
+    `✓ каст сериала #${seriesId}: ${credits.length} чел.`,
+    `✗ каст сериала #${seriesId}`,
+    { type: "seriesCast", seriesId, credits },
+    `✓ каст сериала #${seriesId} — ${credits.length} участников`);
+}
+
+// ---------- эпизоды: /series/{id}/episodes/ (или /film/{id}/episodes/ — общая страница) ----------
+// Классическая вёрстка. Сезон размечен `<a name="sN">` + h1.moviename-big «Сезон N»; эпизод —
+// строка-`<tr>` со span «Эпизод N», h1.moviename-big>b (рус. название), span.episodesOriginalName
+// (оригинал) и датой выхода в правой ячейке. Идём по документу: маркер сезона → строки его эпизодов.
+const SENT_EPISODES = new Set();
+
+function extractEpisodes() {
+  const m = location.pathname.match(/^\/(?:series|film)\/(\d+)\/episodes\/?$/);
+  if (!m) return null;
+  const seriesId = Number(m[1]);
+  const root = document.querySelector(".block_left") || document;
+  const out = [];
+  let ord = 0, season = null, autoEp = 0;
+  for (const el of root.querySelectorAll('a[name], tr')) {
+    if (el.matches("a[name]")) {
+      const nm = (el.getAttribute("name") || "").match(/^s(\d+)$/);   // маркер сезона; y2011 игнорим
+      if (nm) { season = Number(nm[1]); autoEp = 0; }
+      continue;
+    }
+    // строка эпизода: есть span «Эпизод N» и заголовок-название
+    const epSpan = [...el.querySelectorAll("span")].find((s) => /Эпизод/i.test(s.textContent || ""));
+    const h1 = el.querySelector('h1[class*="moviename"]');
+    if (!epSpan || !h1) continue;                                     // заголовок сезона/прочее — пропуск
+    if (season == null) season = 1;
+    const numM = (epSpan.textContent || "").match(/Эпизод\s*(\d+)/i);
+    const episode = numM ? Number(numM[1]) : ++autoEp;
+    const title = clean((h1.querySelector("b") || h1).textContent) || null;
+    const origEl = el.querySelector(".episodesOriginalName");
+    const titleOrig = origEl ? clean(origEl.textContent) || null : null;
+    const tds = el.querySelectorAll(":scope > td");
+    const airDateText = tds.length ? clean(tds[tds.length - 1].textContent) || null : null;
+    out.push({
+      ord: ord++, season, episode, title, titleOrig,
+      airDate: parseRuDate(airDateText || ""), airDateText,
+    });
+  }
+  return out.length ? { seriesId, episodes: out } : null;
+}
+
+function maybeSendEpisodes() {
+  const m = location.pathname.match(/^\/(?:series|film)\/(\d+)\/episodes\/?$/);
+  if (!m) return;
+  const seriesId = Number(m[1]);
+  if (SENT_EPISODES.has(seriesId)) return;
+  const data = extractEpisodes();
+  if (!data) return;
+  commitPage(SENT_EPISODES, seriesId,
+    `⏳ эпизоды #${seriesId}…`,
+    `✓ эпизоды #${seriesId}: ${data.episodes.length}`,
+    `✗ эпизоды #${seriesId}`,
+    { type: "episodes", seriesId, episodes: data.episodes },
+    `✓ эпизоды #${seriesId} — ${data.episodes.length} шт.`);
 }

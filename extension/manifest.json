@@ -18,6 +18,7 @@
         "content-core.js",
         "content-panel.js",
         "content-film.js",
+        "content-series.js",
         "content-discover.js",
         "content-subpages.js",
         "content-person.js",

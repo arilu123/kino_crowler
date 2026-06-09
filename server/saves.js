@@ -1,6 +1,7 @@
 /* Запись данных в БД: фильм (главная), каст, даты, сборы, студии, связи, ключевые слова,
  * награды, персона, исходный HTML. Самообнаружение новых атрибутов → discovered_attrs. */
 const { pool } = require("./db");
+const { seriesSubpageRows } = require("./queue");
 
 // порядок ролей в film_credits
 const CREW_ROLES = [
@@ -187,6 +188,111 @@ async function saveMovie(movie) {
   }
 }
 
+// главная страница сериала /series/{id}/ → отдельные таблицы series / series_credits.
+// Объект — тот же, что отдаёт extract() фильма (страница идентична по формату), пишем в series.*.
+// Критики/IMDb-разбивка пока только в raw (как было у фильмов на старте) — колонки позже при нужде.
+async function saveSeries(movie) {
+  if (!movie || !movie.id) throw new Error("no series id");
+  const r = movie.rating || {};
+  const bo = movie.boxOffice || {};
+  const pr = movie.premieres || {};
+  const rel = movie.releases || {};
+  const poster =
+    typeof movie.poster === "string" && !/^data:/i.test(movie.poster) ? movie.poster : null;
+  const credits = collectCredits(movie);
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const res = await client.query(
+      `INSERT INTO series (
+         id, title, title_orig, year, slogan, genres, countries, duration,
+         age_restriction, rating_mpaa, rating_value, rating_count, description,
+         box_budget, box_marketing, box_usa, box_world, box_rus, audience,
+         premiere_ru, premiere_world, premiere_dvd,
+         release_bluray, release_digital, re_release,
+         source_url, raw, poster, originals, imdb_value, imdb_count, updated_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31, now()
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         title=$2, title_orig=$3, year=$4, slogan=$5, genres=$6, countries=$7,
+         duration=$8, age_restriction=$9, rating_mpaa=$10, rating_value=$11,
+         rating_count=$12, description=$13, box_budget=$14, box_marketing=$15,
+         box_usa=$16, box_world=$17, box_rus=$18, audience=$19, premiere_ru=$20,
+         premiere_world=$21, premiere_dvd=$22,
+         release_bluray=$23, release_digital=$24, re_release=$25,
+         source_url=$26, raw=$27, poster=$28, originals=$29,
+         imdb_value=$30, imdb_count=$31, updated_at=now()
+       RETURNING crawled_at, updated_at, full_cast_fetched`,
+      [
+        movie.id, movie.title, movie.titleOrig, movie.year, movie.slogan,
+        movie.genres || null, movie.countries || null, movie.duration,
+        movie.ageRestriction, movie.ratingMPAA, r.value ?? null, r.count ?? null,
+        movie.description, bo.budget ?? null, bo.marketing ?? null, bo.usa ?? null,
+        bo.world ?? null, bo.rus ?? null, movie.audience, pr.ru ?? null,
+        pr.world ?? null, pr.dvd ?? null,
+        rel.bluray ?? null, rel.digital ?? null, rel.re ?? null,
+        (movie.source && movie.source.url) || null, JSON.stringify(movie), poster,
+        movie.originals ?? null,
+        (movie.imdb && movie.imdb.value) ?? null, (movie.imdb && movie.imdb.count) ?? null,
+      ]
+    );
+
+    for (const p of credits) {
+      await client.query(
+        `INSERT INTO persons (id, name, updated_at) VALUES ($1, $2, now())
+         ON CONFLICT (id) DO UPDATE
+           SET name = COALESCE(persons.name, EXCLUDED.name), updated_at = now()`,
+        [p.id, p.name]
+      );
+    }
+
+    // состав с главной — не перезатираем, если полный каст уже собран со /series/{id}/cast/
+    if (!res.rows[0].full_cast_fetched) {
+      await client.query("DELETE FROM series_credits WHERE series_id=$1", [movie.id]);
+      for (const p of credits) {
+        await client.query(
+          `INSERT INTO series_credits (series_id, person_id, role, ord)
+           VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+          [movie.id, p.id, p.role, p.ord]
+        );
+      }
+    }
+
+    const newAttrs = await recordDiscoveries(client, movie);
+
+    await client.query(
+      `INSERT INTO link_queue (kind, id, title) VALUES ('series', $1, $2)
+       ON CONFLICT (kind, id) DO UPDATE SET title = COALESCE(EXCLUDED.title, link_queue.title)`,
+      [movie.id, movie.title || null]
+    );
+    // подстраницы сериала в очередь (детерминированные URL) — гарантированно при разборе главной
+    for (const [kind, id, title] of seriesSubpageRows(movie.id)) {
+      await client.query(
+        `INSERT INTO link_queue (kind, id, title) VALUES ($1, $2, $3)
+         ON CONFLICT (kind, id) DO UPDATE SET title = COALESCE(link_queue.title, EXCLUDED.title)`,
+        [kind, id, title]
+      );
+    }
+
+    await client.query("COMMIT");
+    const { crawled_at, updated_at } = res.rows[0];
+    const isNew = crawled_at.getTime() === updated_at.getTime();
+    return {
+      id: movie.id, title: movie.title, persons: credits.length,
+      isNew, firstSeen: crawled_at, newAttrs,
+    };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 // полный каст со страницы /film/{id}/cast/ — авторитетно пересобирает film_credits
 async function saveCast({ filmId, credits }) {
   filmId = Number(filmId);
@@ -224,6 +330,74 @@ async function saveCast({ filmId, credits }) {
     );
     await client.query("COMMIT");
     return { filmId, credits: credits.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// полный каст сериала со страницы /series/{id}/cast/ — авторитетно пересобирает series_credits.
+// Страница каста идентична фильмовой, поэтому формат credits тот же, что у saveCast.
+async function saveSeriesCast({ seriesId, credits }) {
+  seriesId = Number(seriesId);
+  if (!seriesId || !Array.isArray(credits) || !credits.length) throw new Error("bad series cast");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO series (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [seriesId]);
+    for (const c of credits) {
+      if (!c.id) continue;
+      await client.query(
+        `INSERT INTO persons (id, name, name_orig, updated_at) VALUES ($1,$2,$3,now())
+         ON CONFLICT (id) DO UPDATE SET
+           name = COALESCE(persons.name, EXCLUDED.name),
+           name_orig = COALESCE(persons.name_orig, EXCLUDED.name_orig),
+           updated_at = now()`,
+        [c.id, c.name || null, c.nameOrig || null]
+      );
+    }
+    await client.query("DELETE FROM series_credits WHERE series_id=$1", [seriesId]);
+    for (const c of credits) {
+      if (!c.id) continue;
+      await client.query(
+        `INSERT INTO series_credits (series_id, person_id, role, ord, character)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+        [seriesId, c.id, c.role, c.ord ?? null, c.character || null]
+      );
+    }
+    await client.query("UPDATE series SET full_cast_fetched=true, updated_at=now() WHERE id=$1", [seriesId]);
+    await client.query("COMMIT");
+    return { seriesId, credits: credits.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// эпизоды со страницы /series/{id}/episodes/ — пересобирает series_episodes
+async function saveEpisodes({ seriesId, episodes }) {
+  seriesId = Number(seriesId);
+  if (!seriesId || !Array.isArray(episodes) || !episodes.length) throw new Error("bad episodes");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO series (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [seriesId]);
+    await client.query("DELETE FROM series_episodes WHERE series_id=$1", [seriesId]);
+    for (const e of episodes) {
+      await client.query(
+        `INSERT INTO series_episodes (series_id, season, episode, ord, title, title_orig, air_date, air_date_text)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,
+        [seriesId, e.season, e.episode, e.ord, e.title || null, e.titleOrig || null,
+         e.airDate || null, e.airDateText || null]
+      );
+    }
+    await client.query("UPDATE series SET episodes_fetched=true, updated_at=now() WHERE id=$1", [seriesId]);
+    await client.query("COMMIT");
+    return { seriesId, episodes: episodes.length };
   } catch (e) {
     await client.query("ROLLBACK");
     throw e;
@@ -348,6 +522,33 @@ async function saveOther({ filmId, relations }) {
     await client.query("UPDATE films SET other_fetched=true, updated_at=now() WHERE id=$1", [filmId]);
     await client.query("COMMIT");
     return { filmId, relations: relations.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// похожие фильмы со страницы /film/{id}/like/ — пересобирает film_similar
+async function saveLike({ filmId, similar }) {
+  filmId = Number(filmId);
+  if (!filmId || !Array.isArray(similar) || !similar.length) throw new Error("bad like");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("INSERT INTO films (id) VALUES ($1) ON CONFLICT (id) DO NOTHING", [filmId]);
+    await client.query("DELETE FROM film_similar WHERE film_id=$1", [filmId]);
+    for (const s of similar) {
+      await client.query(
+        `INSERT INTO film_similar (film_id, ord, similar_id, title, title_orig, year)
+         VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+        [filmId, s.ord, s.similarId ?? null, s.title || null, s.titleOrig || null, s.year ?? null]
+      );
+    }
+    await client.query("UPDATE films SET like_fetched=true, updated_at=now() WHERE id=$1", [filmId]);
+    await client.query("COMMIT");
+    return { filmId, similar: similar.length };
   } catch (e) {
     await client.query("ROLLBACK");
     throw e;
@@ -525,5 +726,6 @@ async function saveHtml({ url, html }) {
 
 module.exports = {
   saveMovie, saveCast, saveDates, saveBox, saveStudio,
-  saveOther, saveKeywords, saveAwards, savePerson, saveHtml,
+  saveOther, saveLike, saveKeywords, saveAwards, savePerson, saveHtml,
+  saveSeries, saveSeriesCast, saveEpisodes,
 };

@@ -15,7 +15,8 @@
 const http = require("http");
 const {
   saveMovie, saveCast, saveDates, saveBox, saveStudio,
-  saveOther, saveKeywords, saveAwards, savePerson, saveHtml,
+  saveOther, saveLike, saveKeywords, saveAwards, savePerson, saveHtml,
+  saveSeries, saveSeriesCast, saveEpisodes,
 } = require("./saves");
 const { knownFilmIds, discoverLinks, queueFilms } = require("./queue");
 
@@ -119,6 +120,65 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(result));
     } catch (e) {
       console.error("✗ other", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/series") {
+    try {
+      const result = await saveSeries(JSON.parse(await readBody(req)));
+      const tag = result.isNew ? "новый" : "обновлён";
+      console.log(`✓ сериал ${result.id} ${result.title} (${result.persons} персон, ${tag})`);
+      if (result.newAttrs && result.newAttrs.length)
+        console.log(`  🆕 новые атрибуты: ${result.newAttrs.join(", ")}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ series", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/series-cast") {
+    try {
+      const result = await saveSeriesCast(JSON.parse(await readBody(req)));
+      console.log(`✓ каст сериала ${result.seriesId} (${result.credits} чел.)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ series-cast", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/episodes") {
+    try {
+      const result = await saveEpisodes(JSON.parse(await readBody(req)));
+      console.log(`✓ эпизоды ${result.seriesId} (${result.episodes} шт.)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ episodes", e.message);
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/like") {
+    try {
+      const result = await saveLike(JSON.parse(await readBody(req)));
+      console.log(`✓ похожие ${result.filmId} (${result.similar} фильмов)`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      console.error("✗ like", e.message);
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: e.message }));
     }

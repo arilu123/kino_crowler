@@ -507,9 +507,134 @@ ad-block CSS и clstorage-скриптами, но награды — обычн
   `/name/3785/` (1 профессия + 1 подроль → 2 строки 10/4). Структура (классы/`data-tid`/маркер)
   идентична на обеих. `POST /person` записал ДиКаприо в таблицу. Если меню нет — вернёт [] (без ложных).
 
+### Решение 32. Белый список разделов в pagesOnPage() + чистка мусора в очереди (2026-06-08)
+- **Что обнаружили:** `pagesOnPage()` захватывал ЛЮБОЙ `/film/{id}/<раздел>/` («чтобы ничего не
+  упустить»), и из ~1100 `page:*` в `link_queue` ~773 оказались мусором: votes (431!), posters, stills,
+  subscribe, reviews, press, video, afisha, media, tracks, like, map, shooting — это не нужный нам контент.
+- **Откуда `rn`:** это НЕ раздел. MPAA-рейтинг на главной фильма отрисован ссылкой
+  `<a href="/film/{id}/rn/<РЕЙТИНГ>/">` (напр. `/film/78871/rn/R/`). `pagesOnPage()` брал первый сегмент
+  после id → «rn», а `/film/{id}/rn/` без рейтинга редиректит на главную. Сам рейтинг уже в `films.rating_mpaa`.
+- **Решение:** в pagesOnPage() — `WANTED_SECTIONS` = {cast,dates,box,studio,other,keywords,awards}
+  (box по странам идёт отдельно через boxCountryPages → page:box:<slug>). Прочее не кладём в очередь.
+  Из БД удалили 773 мусорных `page:*` (`DELETE … WHERE split_part(kind,':',2) NOT IN (<нужные>)`).
+- **votes/video — не нужны** (решение юзера): информация не интересна. `rn` — артефакт, не парсим.
+- **Откат:** ранее в этом ходе добавляли `maybeArchiveUnparsed()` (архив неразобранных страниц ради
+  сэмплов votes/rn/video) — откатан, т.к. эти типы не нужны. content-core.js/content-main.js вернулись.
+- node --check ok. Осталось в очереди только 7 нужных видов page:* (+box:rus).
+
+### Решение 33. Самообнаружение новых ТИПОВ разделов (как атрибуты) (2026-06-08)
+- **Зачем:** после перехода на белый список (реш. 32) неизвестный раздел молча отбрасывался — регресс
+  относительно «ничего не упустить». Восстановили видимость тем же механизмом, что и новые атрибуты.
+- **Как:** клиент (`allFilmSections()` в content-discover.js) собирает ВСЕ типы разделов на странице
+  (по одному примеру) и шлёт в `/discover` полем `sections` (дедуп per-session `sent:section`).
+  background.js пробрасывает. `discoverLinks` (queue.js) пишет каждый в
+  `discovered_attrs (source='section', key=<раздел>, first_film_id, first_value=url)` ON CONFLICT DO NOTHING.
+  Панель уже рисует любую строку discovered_attrs со `status='new'` — отдельный UI не нужен.
+- **Засев:** известные разделы заранее в discovered_attrs: нужные (cast/dates/box/studio/other/keywords/
+  awards) → `promoted` (7), мусорные (votes/video/rn/posters/stills/subscribe/reviews/press/afisha/media/
+  tracks/like/map/shooting) → `ignored` (14). Поэтому всплывёт ТОЛЬКО реально новый раздел.
+- **В очередь идут по-прежнему только нужные** (pagesOnPage белый список) — section-discovery это
+  отдельный сигнал «появился незнакомый раздел», а не постановка в очередь.
+- **Триаж нового раздела** (как у атрибутов, вручную через SQL): либо пишем парсер и добавляем раздел в
+  `WANTED_SECTIONS` + ставим `promoted`, либо `UPDATE discovered_attrs SET status='ignored' …`.
+- **Проверка:** `/discover` с {cast(known), trailers(new)} → cast не всплыл (остался promoted),
+  trailers попал как status='new' и виден в `/queue` pendingAttrs. Тестовую строку удалил. node --check ok.
+
+### Решение 34. Похожие фильмы /film/{id}/like/ → film_similar (2026-06-08)
+- **Разворот реш. 33:** раздел `like` раньше был засеян как `ignored` (мусор). Теперь он нужен —
+  это подборка «Похожих фильмов»: и сам по себе данные (рёбра «похож»), и источник НОВЫХ фильмов
+  в очередь (их подхватывает общий сканер ссылок `filmsOnPage` при заходе на страницу).
+- **БД:** новая `film_similar(film_id, ord, similar_id, title, title_orig, year)` PK(film_id,ord),
+  индексы по film_id и similar_id. Отдельно от `film_relations` (там типизированные сюжетные связи
+  сиквел/ремейк/…; тут — плоская ненаправленная «похожесть», порядок = релевантность по версии Сайта).
+  Новый флаг `films.like_fetched`. Миграция применена к живой БД (ALTER/CREATE + индексы).
+- **Разворот статуса:** `UPDATE discovered_attrs SET status='promoted' WHERE source='section' AND key='like'`
+  — чтобы не всплывал плашкой. `like` добавлен в `WANTED_SECTIONS` (content-discover.js).
+- **Связка (как у other):** `extractLike()/maybeSendLike()` в content-subpages.js, tick() в
+  content-main.js, route в background.js, endpoint `/like` в writer.js, `saveLike()` в saves.js
+  (пересборка DELETE→INSERT, ставит like_fetched).
+- **Разметка (верифицирована на like-301.html):** основной список — таблица `.ten_items`, каждый
+  фильм = `tr[id^="tr_"]`. Название — `a.all[href*="/film/"]` (чистый RU-текст; `a@title` испорчен
+  нашей же подсветкой, использовать НЕЛЬЗЯ). Оригинал+год — в `<span>` сразу за названием
+  («Inception,  (2010) 148 мин.»), запасной год — из `img@alt` («RU (Orig, year)»). Строго
+  ограничиваемся `.ten_items` — на странице есть побочные полосы (`dd.dl` Top-250 сайдбар,
+  `li a[data-metrika=recommender]` «Вы недавно смотрели»), их игнорируем.
+- **Сериалы пропускаем:** часть строк `.ten_items` — это `/series/ID/` (a.all → /series/), вне scope
+  проекта (idFromFilm их не разбирает). Требование `a.all[href*="/film/"]` их отсеивает.
+  На 301: 25 строк `.ten_items` → 22 фильма + 3 сериала (пропущены). TODO при заходе на сериалы.
+- **Проверка:** разбор like-301.html в node → 22 карточки (Начало/Эквилибриум/Тёмный город/…), id+RU+
+  оригинал+год корректны; node --check ok; POST /like end-to-end → строки в film_similar, like_fetched=t
+  (тестовые данные удалены, флаг сброшен).
+
+### Решение 35. Сериалы /series/{id}/ → отдельные таблицы series / series_credits (2026-06-09)
+- **Зачем отдельно от films:** на Кинопоиске id сериала и фильма пересекаются численно (один и тот же
+  id открывается и как /film/N/, и как /series/N/). Чтобы не смешивать — отдельное id-пространство
+  в своих таблицах `series` и `series_credits`. По запросу пользователя (пример — series-397220.html).
+- **Страница идентична главной фильма:** Next.js, `encyclopedic-table`, те же `data-test-id`
+  (directors/writers/genres/year/…), ld `@type=TVSeries`, `itemprop="actor"`. Поэтому разбор
+  ПЕРЕИСПОЛЬЗОВАН: `extract()` в content-film.js разбит на `extract()` (id фильма) + общий
+  `extractFromPage(id, ld)`; сериал зовёт его же со своим id/ld.
+- **Новый модуль content-series.js:** `currentSeriesLd` (TVSeries, по совпадению url), `domSeriesId`
+  (на главной сериала НЕТ ссылки /cast/ — якоримся за canonical/og:url + подстраничные /series/ID/<sub>),
+  `consistentSeriesId`, `extractSeries`, `sendSeries`, `scheduleSeries`. ВАЖНО: отдельный `SEEN_SERIES`
+  (не общий SEEN — иначе коллизия id фильма/сериала). Подключён в manifest после content-film.js,
+  вызван в tick() (content-main.js).
+- **Сервер:** endpoint `/series` → `saveSeries` (зеркало saveMovie: те же колонки в `series`,
+  `series_credits` вместо film_credits, очередь kind='series'; переиспользует collectCredits/
+  recordDiscoveries). Критики/IMDb-разбивка пока только в raw (как было у фильмов на старте).
+- **Обнаружение сериалов в очередь:** `seriesOnPage()` (scan по `a[href*="/series/"]`, idFromSeries) →
+  `/discover` поле `series` → `discoverLinks` пишет `link_queue kind='series'`. Контент сериалов
+  по очереди пока НЕ обходим — копим список (решает проблему «не потерять обнаружение», см. реш. перед этим).
+- **Участие актёров в сериалах** теперь не теряется: с главной сериала пишутся series_credits
+  (хедлайн-каст/съёмочная группа); полный каст — позже со /series/{id}/cast/ (отдельный обход).
+- **Проверка:** node --check всех файлов + manifest ok; миграция применена; POST /series с данными из
+  series-397220.html (Эрго Прокси) → series(1)+series_credits(12: 8 actor+4 directors)+queue kind=series,
+  коллизии с films нет. Самообнаружение поймало серий-специфичный `ld:numberOfEpisodes` (→ кандидат в
+  колонку «число серий/сезонов»). Тестовые артефакты удалены.
+
+### Решение 36. Подстраницы сериала: каст /series/{id}/cast/ + эпизоды /series|film/{id}/episodes/ (2026-06-09)
+- **Каст сериала** — страница ИДЕНТИЧНА фильмовому касту (общая для /film/ и /series/, та же
+  классич. вёрстка `.dub`/`.name a[/name/]`). Экстрактор разбит: общий `parseCastNodes()` (DOM каста)
+  + тонкие обёртки `extractCast()` (/film/, → film_credits) и `maybeSendSeriesCast()` (/series/,
+  → series_credits). Сервер: `/series-cast` → `saveSeriesCast` (зеркало saveCast, ставит
+  series.full_cast_fetched). Так участие актёров в сериалах собирается полностью.
+- **Эпизоды** — новая таблица `series_episodes(series_id, season, episode, ord, title, title_orig,
+  air_date, air_date_text)` PK(series_id,season,episode). Страница `/series|film/{id}/episodes/`
+  (классич., общая): сезон = `<a name="sN">` + h1.moviename-big «Сезон N»; эпизод-`<tr>` = span
+  «Эпизод N» + h1.moviename-big>b (рус.) + span.episodesOriginalName (ориг) + дата в правой td.
+  Экстрактор идёт по документу (`a[name], tr`): s-маркер задаёт текущий сезон, строки с «Эпизод N» —
+  эпизоды. Флаг `series.episodes_fetched`. Сервер: `/episodes` → `saveEpisodes`.
+- **Проверка на 2 фикстурах:** Эрго Прокси (`episodes-397220.html`) — 23 эпизода, 1 сезон;
+  Игра престолов (`episodes-464963.html`) — 73 эпизода по сезонам 10/10/10/10/10/10/7/6 (точно как в
+  реальности), даты/названия/оригиналы верны. POST /episodes и /series-cast end-to-end ок, флаги
+  выставляются, FK CASCADE работает. node --check ок. Тестовые данные удалены.
+- **Вывод про общие подстраницы:** классические /film/{id}/<sub>/ и /series/{id}/<sub>/ — одна и та
+  же страница (один id). Поэтому dates/box/studio/other/keywords/awards/like для сериала можно будет
+  обходить теми же экстракторами с маршрутизацией в series_* — отдельные фикстуры сериала НЕ нужны.
+- **Не сделано:** routing dates/box/studio/other/keywords/awards/like в series_*-таблицы (когда
+  понадобится полный обход сериалов; экстракторы переиспользуются, фикстуры не нужны).
+
+### Решение 37. Обнаружение подстраниц сериала в очередь — детерминированно по id (2026-06-09)
+- **Проблема:** на странице сериала ссылки на его подстраницы ведут в /film/-неймспейс, поэтому
+  сканером ссылок (как pagesOnPage у фильмов) их не поймать.
+- **Решение:** не ищем ссылки, а ВЫВОДИМ URL из id. Хелпер `seriesSubpageRows(id)` в queue.js —
+  единый источник: `page:series:cast` → /series/{id}/cast/, `page:series:episodes` → /series/{id}/episodes/.
+  Ставятся в ТУ ЖЕ link_queue (одна очередь; разные kind не конфликтуют с одноимёнными id фильмов).
+- **Две точки постановки:** `discoverLinks` (когда видим ссылку на сериал где угодно — напр. похожие)
+  и `saveSeries` (гарантированно при разборе главной сериала, даже если пришли по прямому URL).
+- **Проверка:** POST /discover с сериалом → 3 строки в link_queue (series + page:series:cast +
+  page:series:episodes) по одному id, без коллизии с films. node --check + load (нет цикла saves↔queue) ок.
+- **Модель та же, что у фильмов:** page:* строки — это РЕЕСТР «что посетить» для будущего обхода;
+  авто-навигации пока нет ни у фильмов, ни у сериалов (отдельная открытая задача).
+- **Триаж (2026-06-09):** механизм самообнаружения (реш. 33) поднял `section:episodes` (с ссылки
+  /film/397220/episodes/) как status='new' — в исходном засеве разделов `episodes` не было. Раздел
+  реализован (реш. 36) → `UPDATE discovered_attrs SET status='promoted' WHERE source='section' AND
+  key='episodes'`. Плашка ушла. NB: `episodes` НЕ добавляем в WANTED_SECTIONS (pagesOnPage, /film/-неймспейс) —
+  эпизоды сериала ставятся в очередь отдельно как page:series:episodes (реш. 37).
+
 ### Окружение / доступ к БД
 - psql: `/Applications/Postgres.app/Contents/Versions/17/bin/psql -h localhost -U mac -d kinopoisk`
-- writer: `node server/writer.js` (или env `DATABASE_URL`).
+- writer: `node server/writer.js` (или env `DATABASE_URL`); перезапуск — `./restart-server.sh`.
 
 ### Открытые вопросы / следующий шаг
 - Прогнать связку на нескольких живых фильмах (юзер: запустить writer + загрузить расширение).
@@ -517,3 +642,5 @@ ad-block CSS и clstorage-скриптами, но награды — обычн
 - Полный каст: разобрать `/film/{id}/cast/` → films.full_cast_fetched.
 - Косметика полей: box_world формат «+ X = Y», audience хвост «…ещё N».
 - Обнаружение новых фильмов (откуда брать список id для обхода) + отслеживание новинок/обновлений.
+- Сериалы: обход очереди kind='series' (сейчас только копится) + подстраницы /series/{id}/cast/ →
+  series_credits (полный каст), а также число сезонов/серий (ld:numberOfEpisodes уже всплывал).

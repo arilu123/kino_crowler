@@ -10,12 +10,36 @@ let lastStatus = null;
 
 const clean = (s) =>
   (s || "").replace(/ /g, " ").replace(/\s+/g, " ").trim();
+// Текст ссылки «по частям»: на карточках листинга <a> оборачивает несколько вложенных
+// <span> (номер, рус. название, оригинал, рейтинг). a.textContent склеивает их без пробелов
+// ("…будущееBack to the Future8.5…"). Берём текст листовых узлов и склеиваем разделителем,
+// чтобы части читались раздельно. Для простых ссылок (имя персоны) вернёт ровно одну часть.
+const linkText = (a) => {
+  const parts = [];
+  const walk = (node) => {
+    for (const c of node.childNodes) {
+      if (c.nodeType === 3) {                    // текстовый узел
+        const t = clean(c.textContent);
+        if (t) parts.push(t);
+      } else if (c.nodeType === 1) {             // элемент
+        if (c.children.length) walk(c);          // есть вложенные — глубже
+        else { const t = clean(c.textContent); if (t) parts.push(t); }  // лист
+      }
+    }
+  };
+  walk(a);
+  return parts.join(" · ");
+};
 const idFromName = (u) => {
   const m = (u || "").match(/\/name\/(\d+)/);
   return m ? Number(m[1]) : null;
 };
 const idFromFilm = (u) => {
   const m = (u || "").match(/\/film\/(\d+)/);
+  return m ? Number(m[1]) : null;
+};
+const idFromSeries = (u) => {
+  const m = (u || "").match(/\/series\/(\d+)/);
   return m ? Number(m[1]) : null;
 };
 const DEBUG = true;

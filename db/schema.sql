@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS films (
   box_fetched       boolean NOT NULL DEFAULT false,-- /film/{id}/box/ ещё не разбирали
   studio_fetched    boolean NOT NULL DEFAULT false,-- /film/{id}/studio/ ещё не разбирали
   other_fetched     boolean NOT NULL DEFAULT false,-- /film/{id}/other/ (связанные фильмы) ещё не разбирали
+  like_fetched      boolean NOT NULL DEFAULT false,-- /film/{id}/like/ (похожие фильмы) ещё не разбирали
   keywords_fetched  boolean NOT NULL DEFAULT false,-- /film/{id}/keywords/ ещё не разбирали
   awards_fetched    boolean NOT NULL DEFAULT false,-- /film/{id}/awards/ (награды/номинации) ещё не разбирали
   critics_checked   boolean NOT NULL DEFAULT false,-- главную пересняли после ввода критиков/IMDb (реш. 24)
@@ -83,6 +84,78 @@ CREATE TABLE IF NOT EXISTS person_filmography (
   PRIMARY KEY (person_id, ord)
 );
 CREATE INDEX IF NOT EXISTS idx_filmography_person ON person_filmography(person_id);
+
+-- СЕРИАЛЫ (/series/{id}/). ОТДЕЛЬНОЕ id-пространство — на Кинопоиске id сериала и фильма могут
+-- совпадать численно (одна и та же цифра открывается и как /film/N/, и как /series/N/), поэтому
+-- держим их в отдельной таблице, а НЕ в films. Страница сериала — тот же Next.js-формат, что и
+-- главная фильма (encyclopedic-table, ld @type=TVSeries), поэтому набор колонок зеркалит films.
+-- Критики/IMDb-разбивка и подстраницы (cast/dates/…) — позже; пока всё сырьё в raw (страховка).
+CREATE TABLE IF NOT EXISTS series (
+  id                bigint PRIMARY KEY,
+  title             text,
+  title_orig        text,
+  year              int,                           -- год начала (из «Год»/ld)
+  slogan            text,
+  originals         text,
+  genres            text[],
+  countries         text[],
+  duration          int,                           -- минуты (серии)
+  age_restriction   text,
+  rating_mpaa       text,
+  rating_value      numeric,
+  rating_count      int,
+  imdb_value        numeric,
+  imdb_count        int,
+  description       text,
+  poster            text,
+  box_budget        text,
+  box_marketing     text,
+  box_usa           text,
+  box_world         text,
+  box_rus           text,
+  audience          text,
+  premiere_ru       text,
+  premiere_world    text,
+  premiere_dvd      text,
+  release_bluray    text,
+  release_digital   text,
+  re_release        text,
+  source_url        text,
+  raw               jsonb,
+  full_cast_fetched boolean NOT NULL DEFAULT false, -- /series/{id}/cast/ ещё не разбирали
+  episodes_fetched  boolean NOT NULL DEFAULT false, -- /series/{id}/episodes/ ещё не разбирали
+  crawled_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+-- эпизоды сериала со страницы /series/{id}/episodes/ (классическая вёрстка, общая для /film/ и
+-- /series/ — один id даёт одну и ту же страницу). Сезоны размечены `<a name="sN">` + h1.moviename-big
+-- «Сезон N»; эпизод — span «Эпизод N» + h1.moviename-big>b (рус. название) + span.episodesOriginalName
+-- (оригинал) + дата выхода (рус. текст «25 февраля 2006», справа в строке).
+CREATE TABLE IF NOT EXISTS series_episodes (
+  series_id     bigint NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+  season        int    NOT NULL,
+  episode       int    NOT NULL,         -- номер эпизода в сезоне (из «Эпизод N»)
+  ord           int    NOT NULL,         -- сквозной порядок на странице
+  title         text,                    -- название эпизода (рус.)
+  title_orig    text,                    -- оригинальное название (span.episodesOriginalName)
+  air_date      date,                    -- дата выхода (распарсенная; NULL если без полной даты)
+  air_date_text text,                    -- сырьё как на странице
+  PRIMARY KEY (series_id, season, episode)
+);
+CREATE INDEX IF NOT EXISTS idx_episodes_series ON series_episodes(series_id);
+
+-- состав сериала (роли как у film_credits). Отдельная таблица из-за отдельного id-пространства.
+CREATE TABLE IF NOT EXISTS series_credits (
+  series_id  bigint NOT NULL REFERENCES series(id)  ON DELETE CASCADE,
+  person_id  bigint NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  role       text   NOT NULL,
+  ord        int,
+  character  text,
+  PRIMARY KEY (series_id, person_id, role)
+);
+CREATE INDEX IF NOT EXISTS idx_series_credits_person ON series_credits(person_id);
+CREATE INDEX IF NOT EXISTS idx_series_genres ON series USING gin(genres);
 
 -- роли: directors|writers|producers|operators|composers|designers|editors|actor
 CREATE TABLE IF NOT EXISTS film_credits (
@@ -171,6 +244,23 @@ CREATE TABLE IF NOT EXISTS film_relations (
 );
 CREATE INDEX IF NOT EXISTS idx_relations_film ON film_relations(film_id);
 CREATE INDEX IF NOT EXISTS idx_relations_related ON film_relations(related_id);
+
+-- похожие фильмы со страницы /film/{id}/like/ («Похожие фильмы» — редакторско-алгоритмическая
+-- подборка, БЕЗ типизации). Плоский упорядоченный список рёбер film→film. Сам похожий фильм
+-- попадает в link_queue общим сканером ссылок (так добираем новые фильмы в очередь) — здесь
+-- храним само ребро «похож» + название/год для удобства. Отдельно от film_relations: там
+-- типизированные сюжетные связи (сиквел/ремейк/…), тут — ненаправленная «похожесть».
+CREATE TABLE IF NOT EXISTS film_similar (
+  film_id     bigint NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+  ord         int    NOT NULL,   -- порядок на странице (релевантность по версии Сайта)
+  similar_id  bigint,            -- id похожего фильма
+  title       text,              -- RU-название (a.all в строке .ten_items)
+  title_orig  text,              -- оригинальное название (из span «Orig, (YYYY) …»)
+  year        int,               -- год (распарсен из span/alt постера)
+  PRIMARY KEY (film_id, ord)
+);
+CREATE INDEX IF NOT EXISTS idx_similar_film ON film_similar(film_id);
+CREATE INDEX IF NOT EXISTS idx_similar_similar ON film_similar(similar_id);
 
 -- ключевые слова со страницы /film/{id}/keywords/ (теги). id — из /lists/m_act[keyword]/ID/.
 CREATE TABLE IF NOT EXISTS film_keywords (

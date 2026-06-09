@@ -64,17 +64,21 @@ function renderQueue(data) {
   setPendingAttrs((data && data.pendingAttrs) || []); // постоянный показ нерешённых атрибутов
   const films = (data && data.films) || [];
   const recrawl = (data && data.recrawl) || [];
+  const filmsTotal = data && data.filmsTotal != null ? data.filmsTotal : films.length;
+  const recrawlTotal = data && data.recrawlTotal != null ? data.recrawlTotal : recrawl.length;
   if (!films.length && !recrawl.length) {
     elQueue.innerHTML = '<div style="opacity:.6">очередь пуста</div>';
     return;
   }
+  // в скобках — реальное число в очереди; если список обрезан лимитом, дописываем «показано N»
+  const counter = (total, shown) => total > shown ? `${shown} из ${total}` : `${total}`;
   let html = "";
   if (films.length) {
-    html += `<div style="opacity:.7;margin-bottom:4px">Очередь — новые фильмы (${films.length}):</div>`;
+    html += `<div style="opacity:.7;margin-bottom:4px">Очередь — новые фильмы (${counter(filmsTotal, films.length)}):</div>`;
     for (const f of films) html += linkRow(f, "#7cc4ff", "");
   }
   if (recrawl.length) {
-    html += `<div style="opacity:.7;margin:6px 0 4px;padding-top:6px;border-top:1px solid rgba(255,255,255,.15)">↻ Переобход — добор новых полей (${recrawl.length}):</div>`;
+    html += `<div style="opacity:.7;margin:6px 0 4px;padding-top:6px;border-top:1px solid rgba(255,255,255,.15)">↻ Переобход — добор новых полей (${counter(recrawlTotal, recrawl.length)}):</div>`;
     for (const f of recrawl) html += linkRow(f, "#ffb454", "↻ ");
   }
   elQueue.innerHTML = html;

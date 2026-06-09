@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async
   }
   if (msg && msg.type === "discover") {
-    post("/discover", { films: msg.films, persons: msg.persons, pages: msg.pages }, sendResponse);
+    post("/discover", { films: msg.films, persons: msg.persons, series: msg.series, pages: msg.pages, sections: msg.sections }, sendResponse);
     return true; // async
   }
   if (msg && msg.type === "queue") {
@@ -52,6 +52,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     post("/other", { filmId: msg.filmId, relations: msg.relations }, sendResponse);
     return true; // async
   }
+  if (msg && msg.type === "like") {
+    post("/like", { filmId: msg.filmId, similar: msg.similar }, sendResponse);
+    return true; // async
+  }
   if (msg && msg.type === "keywords") {
     post("/keywords", { filmId: msg.filmId, keywords: msg.keywords }, sendResponse);
     return true; // async
@@ -62,6 +66,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg && msg.type === "person") {
     post("/person", { person: msg.person }, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "series") {
+    post("/series", msg.movie, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "seriesCast") {
+    post("/series-cast", { seriesId: msg.seriesId, credits: msg.credits }, sendResponse);
+    return true; // async
+  }
+  if (msg && msg.type === "episodes") {
+    post("/episodes", { seriesId: msg.seriesId, episodes: msg.episodes }, sendResponse);
     return true; // async
   }
   if (msg && msg.type === "html") {
