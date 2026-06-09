@@ -632,6 +632,41 @@ ad-block CSS и clstorage-скриптами, но награды — обычн
   key='episodes'`. Плашка ушла. NB: `episodes` НЕ добавляем в WANTED_SECTIONS (pagesOnPage, /film/-неймспейс) —
   эпизоды сериала ставятся в очередь отдельно как page:series:episodes (реш. 37).
 
+### Решение 38. Кинокомпании как хаб обнаружения → очередь kind='company:<ns>' (2026-06-09)
+- **Что это:** страницы `/lists/m_act[<ns>]/<id>/` — полная фильмография компании (h1 «Прокатчик
+  «Иноекино» (190)», классич. список `N. <a.all>Название</a>, <a.orange>год</a>`). База показывает
+  ~58, полный список — за ссылкой «показать все» → `…/m_act[all]/ok/` (~90 работ).
+- **Решение (по выбору пользователя — «хаб дискавери»):** компании НЕ отдельная таблица данных
+  (film→company уже в film_studios). Вместо этого — реестр в общей link_queue как `kind='company:<ns>'`.
+  `companiesOnPage()` (content-discover.js) ловит `/lists/m_act[company|studio]/<id>/`; ns кодируем в
+  kind, т.к. числовые id `company` и `studio` — РАЗНЫЕ пространства (иначе коллизия). company_en (слаг)
+  пока пропускаем. Фильмы/сериалы компании в очередь кладёт общий сканер (filmsOnPage/seriesOnPage).
+- **Полнота (хвост за «показать все»):** обход компании должен брать m_act[all]/ok-вариант, URL
+  ДЕТЕРМИНИРОВАН по (ns,id): `/lists/m_act[<ns>]/<id>/m_act[all]/ok/` (плюс опц. m_act[count][content]/N
+  и m_act[order]/name) — тогда сканер заберёт ВСЕ работы, а не первую страницу. (Авто-обхода пока нет.)
+- **Проверка:** POST /discover с company+studio одного id → 2 строки company:company/331 и
+  company:studio/331 (без коллизии), фильм со страницы ушёл в queue. node --check ок. Тест убран.
+
+### Решение 39. Триаж ld:numberOfEpisodes → колонка series.episodes_total (2026-06-09)
+- **Триаж:** на реальном сериале (631754) всплыл `ld:numberOfEpisodes` (status='new'). Атрибут нужный
+  (число эпизодов из ld TVSeries; реш. 35 уже отмечал кандидатом) → promote.
+- **Реализация:** колонка `series.episodes_total int`; в общем `extractFromPage()` (content-film.js)
+  добавлено `episodesTotal: num(ld.numberOfEpisodes)` (у фильмов ld его не содержит → null, saveMovie
+  поле игнорирует); `saveSeries` пишет $32=episodes_total. `numberOfEpisodes` добавлен в KNOWN_LD_KEYS
+  (больше не флагается). `UPDATE discovered_attrs … status='promoted'`.
+- **Проверка:** POST /series (Эрго Прокси, ld.numberOfEpisodes=23) → series.episodes_total=23,
+  newAttrs=[], new-атрибутов 0. node --check ок. Тест убран.
+- **NB:** `numberOfSeasons` в ld НЕ встречается; число сезонов берём из series_episodes (реш. 36).
+
+### Фикс (2026-06-09): мигала/пропадала плашка статуса сериала
+- **Симптом:** на /series/ синяя «сериал обновлён» появлялась и тут же исчезала; у фильмов — нет.
+- **Причина:** фильмовый `schedule()` (content-film.js) на КАЖДОМ тике делал `setBadge("","#555")` для
+  любой «не-фильмовой» страницы (`!isMain && не подстраница /film/`), затирая плашку, которую поставил
+  `sendSeries`. У фильма не проявлялось (там после записи `SEEN.has(id)` → ранний return, без сброса).
+- **Фикс:** в условие сброса добавлено исключение `/^\/(series|name)\//` — страницы с собственным
+  обработчиком статуса (сериал/персона) не трогаем. Бонусом устранён такой же скрытый мигающий баг на /name/.
+- **Только клиент** — нужно перезагрузить расширение (chrome://extensions → обновить) + перезагрузить вкладку.
+
 ### Окружение / доступ к БД
 - psql: `/Applications/Postgres.app/Contents/Versions/17/bin/psql -h localhost -U mac -d kinopoisk`
 - writer: `node server/writer.js` (или env `DATABASE_URL`); перезапуск — `./restart-server.sh`.

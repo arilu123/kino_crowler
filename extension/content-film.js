@@ -135,6 +135,7 @@ function extractFromPage(filmId, ld) {
     genres: (rowText("genres") || "").split(",").map(clean).filter(Boolean),
     countries: (rowText("countries") || "").split(",").map(clean).filter(Boolean),
     duration: (ld ? num(ld.timeRequired) : null) || parseMinutes(rowText("duration")),
+    episodesTotal: ld ? num(ld.numberOfEpisodes) : null,  // только у сериалов (ld TVSeries)
     ageRestriction: rowText("ageRestriction"),
     ratingMPAA: rowText("ratingMPAA") || (ld ? clean(ld.contentRating) : null),
     rating: ratingValue != null || ratingCount != null ? { value: ratingValue, count: ratingCount } : null,
@@ -212,8 +213,10 @@ function schedule() {
   const urlId = idFromFilm(path);
   const id = isMain ? consistentId() : null;
   if (!id) {
-    // подстраницы фильма (/cast/ и т.п.) не трогаем — их статусом управляют свои обработчики
-    if (!isMain && !/^\/film\/\d+\/.+/.test(path)) setBadge("", "#555");
+    // страницы с собственным обработчиком статуса не трогаем: подстраницы фильма (/cast/ и т.п.),
+    // сериал (/series/ — scheduleSeries), персона (/name/ — maybeSendPerson). Иначе фильмовый
+    // schedule() каждый тик затирал бы их плашку (баг: плашка сериала мигала и пропадала).
+    if (!isMain && !/^\/film\/\d+\/.+/.test(path) && !/^\/(series|name)\//.test(path)) setBadge("", "#555");
     else if (isMain && !SEEN.has(urlId)) setBadge("⏳ загрузка фильма…", "#555");
     // диагностика «вечного ожидания» — только на главной фильма
     const now = Date.now();

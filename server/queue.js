@@ -21,7 +21,7 @@ async function knownFilmIds(ids) {
 // положить обнаруженные ссылки в очередь (с любых страниц Сайта)
 // films/persons: [{id,title}]; pages: [{filmId, section, url}] — подстраницы фильма (ветки);
 // sections: [{section, filmId, url}] — самообнаружение НОВЫХ типов разделов (не в очередь, а в триаж).
-async function discoverLinks({ films, persons, series, pages, sections }) {
+async function discoverLinks({ films, persons, series, companies, pages, sections }) {
   const rows = [];
   for (const x of films || []) if (x && x.id) rows.push(["film", Number(x.id), x.title || null]);
   for (const x of persons || []) if (x && x.id) rows.push(["person", Number(x.id), x.title || null]);
@@ -37,6 +37,10 @@ async function discoverLinks({ films, persons, series, pages, sections }) {
     rows.push(["series", id, x.title || null]);
     rows.push(...seriesSubpageRows(id));
   }
+  // кинокомпании (хаб обнаружения): kind='company:<ns>' (ns=company|studio — разные пространства id).
+  // Данные не пишем — фильмы/сериалы компании ловит общий сканер; это реестр компаний для обхода.
+  for (const x of companies || [])
+    if (x && x.id && x.ns) rows.push(["company:" + x.ns, Number(x.id), x.name || null]);
   for (const x of pages || [])
     if (x && x.filmId && x.section) rows.push(["page:" + x.section, Number(x.filmId), x.url || null]);
   // новые типы разделов → discovered_attrs source='section'. Известные засеяны (promoted/ignored),

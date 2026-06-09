@@ -20,6 +20,24 @@ const filmsOnPage = () => scan('a[href*="/film/"]', idFromFilm);
 const personsOnPage = () => scan('a[href*="/name/"]', idFromName);
 const seriesOnPage = () => scan('a[href*="/series/"]', idFromSeries);
 
+// кинокомпании: ссылки /lists/m_act[<ns>]/<id>/ (ns = company|studio — РАЗНЫЕ числовые пространства,
+// держим раздельно). company_en (слаг) пока пропускаем. Возвращает Map("ns:id" -> {ns, id, name}).
+// Это «хаб обнаружения»: сами фильмы/сериалы компании ловит общий сканер (filmsOnPage/seriesOnPage),
+// а полный список — за ссылкой «показать все» (обход возьмёт m_act[all]/ok-вариант по id, см. WorkHistory).
+function companiesOnPage() {
+  const m = new Map();
+  for (const a of document.querySelectorAll('a[href*="m_act"]')) {
+    if (inPanel(a)) continue;
+    const mm = (a.getAttribute("href") || "").match(/m_act(?:%5B|\[)(company|studio)(?:%5D|\])\/(\d+)\b/i);
+    if (!mm) continue;
+    const ns = mm[1].toLowerCase(), id = Number(mm[2]);
+    const key = ns + ":" + id;
+    const name = clean(a.textContent);
+    if (!m.has(key) || (!m.get(key).name && name)) m.set(key, { ns, id, name: name || null });
+  }
+  return m;
+}
+
 // ---------- подсветка посещённых фильмов ----------
 function applyMarks() {
   for (const a of document.querySelectorAll('a[href*="/film/"]')) {
@@ -101,7 +119,7 @@ function allFilmSections() {
 // ---------- складирование обнаруженных ссылок в очередь ----------
 const sentLinks = new Set(); // 'film:ID' / 'person:ID' / 'page:ID:section' / 'sect:section' — уже отправленные
 function sendDiscover() {
-  const films = [], persons = [], series = [], pages = [], sections = [];
+  const films = [], persons = [], series = [], companies = [], pages = [], sections = [];
   for (const [id, title] of filmsOnPage()) {
     const k = "film:" + id; if (sentLinks.has(k)) continue; sentLinks.add(k); films.push({ id, title });
   }
@@ -112,6 +130,10 @@ function sendDiscover() {
   for (const [id, title] of seriesOnPage()) {
     const k = "series:" + id; if (sentLinks.has(k)) continue; sentLinks.add(k); series.push({ id, title });
   }
+  // кинокомпании: хаб обнаружения → очередь kind='company:<ns>' (фильмы компании ловит общий сканер)
+  for (const [key, c] of companiesOnPage()) {
+    const k = "company:" + key; if (sentLinks.has(k)) continue; sentLinks.add(k); companies.push(c);
+  }
   for (const [key, p] of pagesOnPage()) {
     const k = "page:" + key; if (sentLinks.has(k)) continue; sentLinks.add(k); pages.push(p);
   }
@@ -121,6 +143,6 @@ function sendDiscover() {
   for (const [section, s] of allFilmSections()) {      // самообнаружение типов разделов
     const k = "sect:" + section; if (sentLinks.has(k)) continue; sentLinks.add(k); sections.push(s);
   }
-  if (!films.length && !persons.length && !series.length && !pages.length && !sections.length) return;
-  chrome.runtime.sendMessage({ type: "discover", films, persons, series, pages, sections }, () => refreshQueue());
+  if (!films.length && !persons.length && !series.length && !companies.length && !pages.length && !sections.length) return;
+  chrome.runtime.sendMessage({ type: "discover", films, persons, series, companies, pages, sections }, () => refreshQueue());
 }

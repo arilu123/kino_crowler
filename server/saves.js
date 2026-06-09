@@ -26,6 +26,7 @@ const KNOWN_LD_KEYS = new Set([
   "isFamilyFriendly", "producer", "director", "actor", "countryOfOrigin",
   "timeRequired", "datePublished",
   "award", "video",  // решение 9: пока живут в raw (_ld), структура позже
+  "numberOfEpisodes",                               // сериалы: число эпизодов → series.episodes_total
 ]);
 // известные строки страницы персоны (/name/{id}/); прочее → discovered_attrs source='name'
 const KNOWN_NAME_KEYS = new Set([
@@ -212,10 +213,10 @@ async function saveSeries(movie) {
          box_budget, box_marketing, box_usa, box_world, box_rus, audience,
          premiere_ru, premiere_world, premiere_dvd,
          release_bluray, release_digital, re_release,
-         source_url, raw, poster, originals, imdb_value, imdb_count, updated_at
+         source_url, raw, poster, originals, imdb_value, imdb_count, episodes_total, updated_at
        ) VALUES (
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31, now()
+         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32, now()
        )
        ON CONFLICT (id) DO UPDATE SET
          title=$2, title_orig=$3, year=$4, slogan=$5, genres=$6, countries=$7,
@@ -225,7 +226,7 @@ async function saveSeries(movie) {
          premiere_world=$21, premiere_dvd=$22,
          release_bluray=$23, release_digital=$24, re_release=$25,
          source_url=$26, raw=$27, poster=$28, originals=$29,
-         imdb_value=$30, imdb_count=$31, updated_at=now()
+         imdb_value=$30, imdb_count=$31, episodes_total=$32, updated_at=now()
        RETURNING crawled_at, updated_at, full_cast_fetched`,
       [
         movie.id, movie.title, movie.titleOrig, movie.year, movie.slogan,
@@ -238,6 +239,7 @@ async function saveSeries(movie) {
         (movie.source && movie.source.url) || null, JSON.stringify(movie), poster,
         movie.originals ?? null,
         (movie.imdb && movie.imdb.value) ?? null, (movie.imdb && movie.imdb.count) ?? null,
+        movie.episodesTotal ?? null,
       ]
     );
 

@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS series (
   imdb_count        int,
   description       text,
   poster            text,
+  episodes_total    int,                            -- число эпизодов (ld.numberOfEpisodes, серий-специфично)
   box_budget        text,
   box_marketing     text,
   box_usa           text,

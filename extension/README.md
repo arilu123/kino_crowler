@@ -99,7 +99,7 @@
   - `content-panel.js` — плавающая панель (очередь, переобход, бейдж, новые атрибуты).
   - `content-film.js` — главная фильма `/film/{id}/`: `extract()` + общий `extractFromPage()` + `send`/`schedule`.
   - `content-series.js` — главная сериала `/series/{id}/`: переиспользует `extractFromPage()` → `series`/`series_credits`.
-  - `content-discover.js` — сбор ссылок (фильмы/персоны/сериалы), подсветка посещённых, отправка в очередь.
+  - `content-discover.js` — сбор ссылок (фильмы/персоны/сериалы/кинокомпании), подсветка посещённых, отправка в очередь.
   - `content-subpages.js` — `/cast/ /dates/ /box/ /studio/ /other/ /like/ /keywords/ /awards/` +
     каст сериала `/series/{id}/cast/` и эпизоды `/series|film/{id}/episodes/`.
   - `content-person.js` — `/name/{id}/` (формат Next.js).

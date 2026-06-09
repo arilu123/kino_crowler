@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async
   }
   if (msg && msg.type === "discover") {
-    post("/discover", { films: msg.films, persons: msg.persons, series: msg.series, pages: msg.pages, sections: msg.sections }, sendResponse);
+    post("/discover", { films: msg.films, persons: msg.persons, series: msg.series, companies: msg.companies, pages: msg.pages, sections: msg.sections }, sendResponse);
     return true; // async
   }
   if (msg && msg.type === "queue") {
